@@ -15,6 +15,7 @@ import { DataNormalizer } from '../services/ocr/normalizer.js';
 import { createSupabaseUserClient, getSupabaseAdminClient } from '../services/supabaseClient.js';
 import { UnifiedTableService } from '../services/unifiedTableService.js';
 import { preflightService, PREFLIGHT_CONFIG } from '../services/preflightService.js';
+import { humanReviewService } from '../services/humanReviewService.js';
 
 const router = express.Router();
 
@@ -321,165 +322,158 @@ router.post('/upload', ocrRateLimiter, upload.single('file'), async (req: Authen
   }
 });
 
-// 5.1 CONFIRM AND TRIGGER EXPENSIVE OCR PROCESSING PIPELINE
+// 5.1 CONFIRM AND TRIGGER EXPENSIVE OCR PROCESSING PIPELINE (ATOMIC POSTGRESQL TRANSACTION)
 router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const userId = req.user!.id;
   const docId = req.params.id;
   const requestedOutputType = (req.body?.outputType || 'EXCEL').toUpperCase();
 
-  console.log(`[PROCESSING_CONFIRM_REQUESTED] docId: ${docId}, userId: ${userId}, outputType: ${requestedOutputType}`);
+  console.log(`[PROCESS_CONFIRM_STARTED] docId: ${docId}, userId: ${userId}, outputType: ${requestedOutputType}`);
+
+  // 1. Validate Selected Output Type (Word guard - do not route to Excel!)
+  if (requestedOutputType === 'WORD') {
+    console.warn(`[PROCESS_CONFIRM_REJECTED] docId: ${docId}, outputType: WORD unsupported`);
+    res.status(400).json({
+      success: false,
+      code: 'UNSUPPORTED_OUTPUT_TYPE',
+      error: 'Chức năng chuyển đổi sang Word (.docx) đang được phát triển (Sắp ra mắt). Vui lòng chọn đầu ra Excel để tiếp tục.',
+    });
+    return;
+  }
 
   try {
-    // 1. Verify Document existence & ownership
-    const document = await db.getUserDocumentById(userId, docId, req.userToken);
-    if (!document) {
-      console.warn(`[PROCESSING_CONFIRM_REJECTED] docId ${docId} not found or unauthorized`);
+    // 2. Call Atomic PostgreSQL RPC (locks document & quota, verifies state, creates job, deducts quota, transitions document)
+    const result = await db.confirmDocumentProcessing(
+      userId,
+      docId,
+      requestedOutputType,
+      req.userToken
+    );
+
+    // 3. Handle Idempotent Results
+    if (result.already_processing) {
+      console.log(`[PROCESS_CONFIRM_ALREADY_PROCESSING] docId: ${docId}, jobId: ${result.job?.id}`);
+      res.json({
+        success: true,
+        alreadyProcessing: true,
+        message: result.message || 'Tài liệu đã nằm trong hàng đợi xử lý.',
+        document: result.document,
+        job: result.job,
+        quota: result.quota,
+      });
+      return;
+    }
+
+    if (result.already_completed) {
+      console.log(`[PROCESS_CONFIRM_ALREADY_COMPLETED] docId: ${docId}, jobId: ${result.job?.id}`);
+      res.json({
+        success: true,
+        alreadyCompleted: true,
+        message: result.message || 'Tài liệu đã được xử lý hoàn tất.',
+        document: result.document,
+        job: result.job,
+        quota: result.quota,
+      });
+      return;
+    }
+
+    // 4. TRANSACTION IS COMMITTED!
+    console.log(`[PROCESS_CONFIRM_COMMITTED] docId: ${docId}, jobId: ${result.job?.id}, quotaUsed: ${result.quota.used}/${result.quota.total}`);
+
+    // 5. Trigger Background Worker ONLY AFTER COMMIT
+    if (result.job?.id) {
+      try {
+        ocrService.startExistingJob(userId, result.job.id, docId);
+        console.log(`[PROCESS_WORKER_STARTED] docId: ${docId}, jobId: ${result.job.id}`);
+      } catch (workerStartErr: any) {
+        console.error(`[PROCESS_WORKER_START_FAILED] docId: ${docId}, jobId: ${result.job.id}:`, workerStartErr);
+        // Database remains durable & consistent: document is QUEUED, quota consumed once, job is QUEUED.
+        // Worker failure post-commit is recovered via resumeUnfinishedJobs() on startup.
+      }
+    }
+
+    // 6. Non-critical Audit Log (Outside critical transaction)
+    try {
+      await auditService.log({
+        userId,
+        action: 'PROCESSING_CONFIRMED',
+        resourceType: 'documents',
+        resourceId: docId,
+        ipAddress: req.ip,
+        metadata: {
+          outputType: requestedOutputType,
+          jobId: result.job?.id,
+          pageCount: result.document?.page_count,
+        },
+      });
+    } catch (auditErr) {
+      console.warn(`[AuditLog Warning] Non-critical audit log failed for doc ${docId}:`, auditErr);
+    }
+
+    res.json({
+      success: true,
+      message: result.message || 'Đã xác nhận và bắt đầu đưa tài liệu vào hàng đợi xử lý OCR.',
+      document: result.document,
+      job: result.job,
+      quota: result.quota,
+    });
+  } catch (err: any) {
+    const errorMsg = String(err.message || '');
+    console.error(`[PROCESS_CONFIRM_FAILED] docId: ${docId}:`, errorMsg);
+
+    // Map PostgreSQL RPC exceptions to application-level HTTP errors
+    if (errorMsg.includes('INSUFFICIENT_QUOTA')) {
+      console.warn(`[PROCESS_CONFIRM_QUOTA_REJECTED] docId: ${docId}, userId: ${userId}`);
+      res.status(403).json({
+        success: false,
+        code: 'INSUFFICIENT_QUOTA',
+        error: 'Bạn đã sử dụng hết số tài liệu của gói hiện tại. Vui lòng nâng cấp gói để tiếp tục xử lý.',
+      });
+      return;
+    }
+
+    if (errorMsg.includes('DOCUMENT_NOT_FOUND')) {
       res.status(404).json({
         success: false,
+        code: 'DOCUMENT_NOT_FOUND',
         error: 'Tài liệu không tồn tại hoặc bạn không có quyền truy cập.',
       });
       return;
     }
 
-    // 2. Validate Selected Output Type (Word guard - do not route to Excel!)
-    if (requestedOutputType === 'WORD') {
-      console.warn(`[PROCESSING_CONFIRM_REJECTED] Word requested but not supported yet.`);
+    if (errorMsg.includes('DOCUMENT_ACCESS_DENIED')) {
+      res.status(403).json({
+        success: false,
+        code: 'DOCUMENT_ACCESS_DENIED',
+        error: 'Truy cập bị từ chối. Bạn không sở hữu tài liệu này.',
+      });
+      return;
+    }
+
+    if (errorMsg.includes('INVALID_DOCUMENT_STATE')) {
       res.status(400).json({
         success: false,
+        code: 'INVALID_DOCUMENT_STATE',
+        error: 'Trạng thái tài liệu không hợp lệ để bắt đầu xử lý.',
+      });
+      return;
+    }
+
+    if (errorMsg.includes('UNSUPPORTED_OUTPUT_TYPE')) {
+      res.status(400).json({
+        success: false,
+        code: 'UNSUPPORTED_OUTPUT_TYPE',
         error: 'Chức năng chuyển đổi sang Word (.docx) đang được phát triển (Sắp ra mắt). Vui lòng chọn đầu ra Excel để tiếp tục.',
       });
       return;
     }
 
-    // 3. Idempotency Check: If already queued or processing or completed, return existing job without deducting quota
-    if (document.status === 'QUEUED' || document.status === 'PROCESSING') {
-      const existingJob = await db.getJobByDocumentId(userId, docId);
-      const quota = await quotaService.checkUserQuota(userId);
-      res.json({
-        success: true,
-        message: 'Tài liệu đã nằm trong hàng đợi xử lý.',
-        document,
-        job: existingJob,
-        quota,
-      });
-      return;
-    }
-
-    if (document.status === 'READY' || document.status === 'REVIEW_REQUIRED') {
-      const existingJob = await db.getJobByDocumentId(userId, docId);
-      const quota = await quotaService.checkUserQuota(userId);
-      res.json({
-        success: true,
-        message: 'Tài liệu đã được xử lý hoàn tất.',
-        document,
-        job: existingJob,
-        quota,
-      });
-      return;
-    }
-
-    // Document must be in WAITING_CONFIRMATION or UPLOADED state
-    if (document.status !== 'WAITING_CONFIRMATION' && document.status !== 'UPLOADED') {
-      res.status(400).json({
-        success: false,
-        error: `Trạng thái tài liệu không hợp lệ để bắt đầu xử lý (${document.status}).`,
-      });
-      return;
-    }
-
-    // 4. Server-Side Quota Enforcement
-    const quota = await quotaService.checkUserQuota(userId);
-    if (!quota.allowed) {
-      res.status(403).json({
-        success: false,
-        error: quota.message || 'Bạn đã sử dụng hết số tài liệu của gói hiện tại. Vui lòng nâng cấp gói để tiếp tục xử lý.',
-      });
-      return;
-    }
-
-    // 5. Atomic State Transition Guard (Prevents double clicks, parallel tabs, concurrent requests)
-    const transitionedDoc = await db.transitionDocumentStatus(
-      userId,
-      docId,
-      document.status,
-      'QUEUED',
-      requestedOutputType,
-      req.userToken
-    );
-
-    if (!transitionedDoc) {
-      // Another concurrent request won the race and transitioned first!
-      console.warn(`[PROCESSING_CONFIRM_RACE] Concurrent process attempt for docId ${docId}. Returning current state.`);
-      const currentDoc = await db.getUserDocumentById(userId, docId, req.userToken);
-      const currentJob = await db.getJobByDocumentId(userId, docId);
-      const currentQuota = await quotaService.checkUserQuota(userId);
-      res.json({
-        success: true,
-        message: 'Tài liệu đang được xử lý bởi tác vụ trước đó.',
-        document: currentDoc,
-        job: currentJob,
-        quota: currentQuota,
-      });
-      return;
-    }
-
-    // 6. Atomically Deduct Quota (DUY NHẤT TẠI BƯỚC XÁC NHẬN NÀY!)
-    let updatedQuota;
-    try {
-      updatedQuota = await quotaService.consumeQuota(userId);
-    } catch (quotaErr: any) {
-      // Compensate: rollback document status back to WAITING_CONFIRMATION
-      await db.updateDocumentStatus(userId, docId, 'WAITING_CONFIRMATION');
-      res.status(403).json({
-        success: false,
-        error: quotaErr.message || 'Lỗi trừ hạn mức sử dụng.',
-      });
-      return;
-    }
-
-    // 7. Create Processing Job in QUEUED state & Trigger Background Worker
-    let job;
-    try {
-      job = await ocrService.queueDocumentForProcessing(userId, docId);
-    } catch (jobErr: any) {
-      console.error(`[Processing Error] Failed to queue OCR for doc ${docId}:`, jobErr);
-      // Compensating rollback
-      await db.updateDocumentStatus(userId, docId, 'WAITING_CONFIRMATION');
-      res.status(500).json({
-        success: false,
-        error: 'Không thể tạo tác vụ xử lý OCR. Vui lòng thử lại.',
-      });
-      return;
-    }
-
-    // 8. Log Audit Trail (PROCESSING_CONFIRMED)
-    await auditService.log({
-      userId,
-      action: 'PROCESSING_CONFIRMED',
-      resourceType: 'documents',
-      resourceId: docId,
-      ipAddress: req.ip,
-      metadata: {
-        outputType: requestedOutputType,
-        jobId: job.id,
-        pageCount: transitionedDoc.page_count,
-      },
-    });
-
-    console.log(`[PROCESSING_CONFIRMED] docId: ${docId}, jobId: ${job.id}, quotaUsed: ${updatedQuota.used}/${updatedQuota.total}`);
-
-    res.json({
-      success: true,
-      message: 'Đã xác nhận và bắt đầu đưa tài liệu vào hàng đợi xử lý OCR.',
-      document: transitionedDoc,
-      job,
-      quota: updatedQuota,
-    });
-  } catch (err: any) {
-    console.error(`[Process Confirmation Error] docId: ${docId}:`, err);
+    // Generic transaction failure (everything in PostgreSQL was rolled back)
+    console.warn(`[PROCESS_CONFIRM_ROLLED_BACK] docId: ${docId}, error: ${errorMsg}`);
     res.status(500).json({
       success: false,
-      error: err.message || 'Lỗi khi kích hoạt xử lý tài liệu.',
+      code: 'TRANSACTION_FAILED',
+      error: 'Lỗi khi kích hoạt xử lý tài liệu. Mọi thay đổi đã được hoàn tác.',
     });
   }
 });
@@ -646,6 +640,7 @@ router.post('/:id/ocr', ocrRateLimiter, async (req: AuthenticatedRequest, res: R
     }
 
     const job = await ocrService.retryDocumentProcessing(userId, docId);
+    await humanReviewService.resetReviewOnOcrRerun(userId, docId);
 
     await auditService.log({
       userId,
@@ -667,7 +662,7 @@ router.post('/:id/ocr', ocrRateLimiter, async (req: AuthenticatedRequest, res: R
   }
 });
 
-// 9. UPDATE EXTRACTED CELL (Review & Edit Data)
+// 9. UPDATE EXTRACTED CELL (Human Review & Edit Data)
 router.put('/:id/cells/:cellId', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user!.id;
@@ -675,24 +670,11 @@ router.put('/:id/cells/:cellId', async (req: AuthenticatedRequest, res: Response
     const cellId = req.params.cellId;
     const { rawValue, cellType } = req.body;
 
-    // Backend is the Single Source of Truth for normalization
-    const normalized = DataNormalizer.normalizeCell(rawValue, cellType);
-
-    const updatedCell = await db.updateExtractedCell(userId, docId, cellId, {
-      rawValue: normalized.rawValue,
-      normalizedValue: normalized.normalizedValue,
-      cellType: normalized.cellType,
-      isReviewed: true,
-    }, req.userToken);
-
-    res.json({
-      success: true,
-      message: 'Đã cập nhật ô dữ liệu thành công.',
-      cell: updatedCell,
-    });
+    const result = await humanReviewService.editCell(userId, docId, cellId, rawValue, cellType, req.userToken);
+    res.status(result.status).json(result);
   } catch (err: any) {
     console.error('Update cell error:', err);
-    res.status(400).json({ success: false, error: err.message || 'Không thể cập nhật ô dữ liệu.' });
+    res.status(err.status || 500).json({ success: false, error: err.message || 'Không thể cập nhật ô dữ liệu.' });
   }
 });
 
@@ -703,25 +685,11 @@ router.put('/:id/cells/:cellId/confirm-review', async (req: AuthenticatedRequest
     const docId = req.params.id;
     const cellId = req.params.cellId;
 
-    // Verify document ownership & RLS
-    const doc = await db.getUserDocumentById(userId, docId, req.userToken);
-    if (!doc) {
-      res.status(404).json({ success: false, error: 'Không tìm thấy tài liệu hoặc không có quyền truy cập.' });
-      return;
-    }
-
-    const updatedCell = await db.updateExtractedCell(userId, docId, cellId, {
-      isReviewed: true,
-    }, req.userToken);
-
-    res.json({
-      success: true,
-      message: 'Đã xác nhận ô dữ liệu đúng.',
-      cell: updatedCell,
-    });
+    const result = await humanReviewService.confirmCell(userId, docId, cellId, req.userToken);
+    res.status(result.status).json(result);
   } catch (err: any) {
     console.error('Confirm review error:', err);
-    res.status(400).json({ success: false, error: err.message || 'Không thể xác nhận ô dữ liệu.' });
+    res.status(err.status || 500).json({ success: false, error: err.message || 'Không thể xác nhận ô dữ liệu.' });
   }
 });
 
@@ -767,31 +735,17 @@ router.delete('/:id/tables/:tableId/rows/:rowIndex', async (req: AuthenticatedRe
   }
 });
 
-// 12. COMPLETE DOCUMENT REVIEW
+// 12. COMPLETE DOCUMENT REVIEW (Review Completion Gate)
 router.post('/:id/review/complete', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user!.id;
     const docId = req.params.id;
 
-    const doc = await db.markDocumentReviewed(userId, docId, req.userToken);
-
-    await auditService.log({
-      userId,
-      action: 'COMPLETE_REVIEW',
-      resourceType: 'documents',
-      resourceId: docId,
-      ipAddress: req.ip,
-      metadata: { originalFilename: doc.original_filename },
-    });
-
-    res.json({
-      success: true,
-      message: 'Đã hoàn tất đối soát dữ liệu. Tài liệu sẵn sàng để xuất file.',
-      document: doc,
-    });
+    const result = await humanReviewService.completeReview(userId, docId, req.userToken);
+    res.status(result.status).json(result);
   } catch (err: any) {
     console.error('Complete review error:', err);
-    res.status(400).json({ success: false, error: err.message || 'Không thể hoàn tất đối soát.' });
+    res.status(err.status || 500).json({ success: false, error: err.message || 'Không thể hoàn tất đối soát.' });
   }
 });
 

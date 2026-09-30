@@ -33,6 +33,20 @@ export interface UnifiedCell {
   isReviewed?: boolean;
   boundingPolygon?: any;
   isPlaceholder?: boolean;
+
+  // Phase 6 Validation Engine preservation
+  validationStatus?: 'ACCEPTED' | 'WARNING' | 'REVIEW_REQUIRED';
+  validationIssues?: any[];
+  requiresSecondaryOcr?: boolean;
+  structureConfidence?: number | null;
+
+  // Phase 7 Targeted Secondary OCR & Conflict Resolution preservation
+  originalRawValue?: string | null;
+  resolutionStatus?: 'NOT_REQUIRED' | 'PENDING' | 'RESOLVED' | 'UNRESOLVED' | 'HUMAN_REVIEW_REQUIRED';
+  resolutionMethod?: 'NONE' | 'DETERMINISTIC' | 'SECONDARY_OCR' | 'SECONDARY_OCR_ENHANCED' | 'GEMINI' | 'HUMAN';
+
+  // Coordinate system
+  coordinateUnit?: string;
 }
 
 export interface UnifiedRow {
@@ -302,6 +316,20 @@ export class UnifiedTableService {
                 isReviewed: Boolean(cell.isReviewed),
                 boundingPolygon: cell.boundingPolygon,
                 isPlaceholder: false,
+
+                // Phase 6 Validation preservation
+                validationStatus: cell.validationStatus || 'ACCEPTED',
+                validationIssues: cell.validationIssues || [],
+                requiresSecondaryOcr: Boolean(cell.requiresSecondaryOcr),
+                structureConfidence: cell.structureConfidence != null ? Number(cell.structureConfidence) : null,
+
+                // Phase 7 Secondary OCR & Conflict Resolution preservation
+                originalRawValue: cell.originalRawValue !== undefined ? cell.originalRawValue : (cell.rawValue || ''),
+                resolutionStatus: cell.resolutionStatus || 'NOT_REQUIRED',
+                resolutionMethod: cell.resolutionMethod || 'NONE',
+
+                // Coordinate unit
+                coordinateUnit: cell.coordinateUnit || 'point',
               });
               continue;
             }
@@ -319,6 +347,12 @@ export class UnifiedTableService {
             cellType: 'TEXT',
             confidence: null,
             confidenceSource: 'EMPTY_CELL',
+            validationStatus: 'ACCEPTED',
+            validationIssues: [],
+            requiresSecondaryOcr: false,
+            originalRawValue: null,
+            resolutionStatus: 'NOT_REQUIRED',
+            resolutionMethod: 'NONE',
             isPlaceholder: true,
           });
         }

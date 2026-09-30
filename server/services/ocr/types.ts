@@ -19,8 +19,16 @@ export interface OCRExtractedCell {
   normalizedValue?: string;
   cellType: CellType;
   confidence: number | null;
-  confidenceSource?: 'AZURE_WORD_AGGREGATE' | 'AZURE_CELL' | 'EMPTY_CELL' | 'UNAVAILABLE';
+  confidenceSource?: 'AZURE_WORD_AGGREGATE' | 'AZURE_CELL' | 'EMPTY_CELL' | 'UNAVAILABLE' | 'LOCAL_HEURISTIC' | 'AZURE_MODEL' | string;
+  structureConfidence?: number;
+  coordinateUnit?: 'point' | 'inch' | 'pixel';
+  validationStatus?: 'ACCEPTED' | 'WARNING' | 'REVIEW_REQUIRED';
+  validationIssues?: any[];
+  requiresSecondaryOcr?: boolean;
   isReviewed?: boolean;
+  originalRawValue?: string | null;
+  resolutionStatus?: string;
+  resolutionMethod?: string;
   kind?: 'content' | 'rowHeader' | 'columnHeader';
   boundingPolygon?: number[]; // [x1, y1, x2, y2, x3, y3, x4, y4]
 }
@@ -38,7 +46,10 @@ export interface OCRExtractedTable {
   tableIndex: number;
   rowCount: number;
   columnCount: number;
-  confidence: number;
+  confidence: number | null;
+  confidenceSource?: string;
+  structureConfidence?: number;
+  coordinateUnit?: 'point' | 'inch' | 'pixel';
   boundingRegions?: any[];
   rows: OCRExtractedRow[];
   headers?: string[];

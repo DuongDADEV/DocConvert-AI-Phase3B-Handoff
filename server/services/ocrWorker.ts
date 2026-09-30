@@ -1,7 +1,12 @@
 import { db, ProcessingJobRecord } from '../db/db.js';
 import { storageService } from './storageService.js';
 import { azureOcrProvider } from './ocr/AzureDocumentIntelligenceProvider.js';
-import { DocumentAIProvider } from './ocr/types.js';
+import { DocumentAIProvider, OCRAnalysisResult } from './ocr/types.js';
+import { processingDecisionEngine, PDE_VERSION } from './pde/ProcessingDecisionEngine.js';
+import { ProcessingExecutor } from './pde/ProcessingExecutor.js';
+import type { DocumentProcessingPlan } from './pde/types.js';
+import { ValidationEngine } from './validation/ValidationEngine.js';
+import { SecondaryOcrCoordinator } from './secondaryOcr/SecondaryOcrCoordinator.js';
 
 export class OcrBackgroundWorker {
   private provider: DocumentAIProvider;
@@ -11,33 +16,48 @@ export class OcrBackgroundWorker {
 
   constructor(provider?: DocumentAIProvider) {
     this.provider = provider || azureOcrProvider;
-    this.resumeUnfinishedJobs();
+    // Startup recovery is NOT invoked in constructor to avoid duplicate triggers.
+    // It is authoritatively invoked via await ocrWorker.resumeUnfinishedJobs() during server startup in server.ts.
   }
 
   /**
-   * Resume QUEUED and PROCESSING jobs from Supabase PostgreSQL on startup
+   * Authoritative Startup Recovery:
+   * Resumes any unfinished active jobs (QUEUED, PROCESSING, VALIDATING, UPLOADING, PARSING, VALIDATING_RESULT)
+   * from Supabase PostgreSQL upon server startup.
+   * Concurrency safe: prevents concurrent duplicate scans via isResumingQueue and inFlightJobs guard.
    */
-  async resumeUnfinishedJobs(): Promise<void> {
-    if (this.isResumingQueue) return;
+  async resumeUnfinishedJobs(): Promise<ProcessingJobRecord[]> {
+    if (this.isResumingQueue) {
+      console.log('[OcrWorker] Recovery is already in progress. Skipping duplicate concurrent recovery trigger.');
+      return [];
+    }
     this.isResumingQueue = true;
+    const resumedJobs: ProcessingJobRecord[] = [];
     try {
+      console.log('[PROCESS_JOB_RECOVERY_STARTED] Scanning PostgreSQL for active unfinished jobs...');
       const pendingJobs = await db.getQueuedJobs();
       if (pendingJobs.length > 0) {
-        console.log(`[OcrWorker] Found ${pendingJobs.length} unfinished jobs in PostgreSQL. Resuming...`);
+        console.log(`[PROCESS_JOB_RECOVERY_STARTED] Found ${pendingJobs.length} active unfinished jobs to resume.`);
         for (const job of pendingJobs) {
           if (this.inFlightJobs.has(job.id)) {
+            console.log(`[OcrWorker] Job ${job.id} already in-flight. Skipping duplicate.`);
             continue;
           }
+          resumedJobs.push(job);
           this.processJob(job.user_id, job.id, job.document_id).catch((err) => {
-            console.error(`[OcrWorker] Error resuming job ${job.id}:`, err);
+            console.error(`[PROCESS_JOB_RECOVERY_FAILED] Error resuming job ${job.id}:`, err);
           });
         }
+        console.log(`[PROCESS_JOB_RECOVERY_COMPLETED] Resumed ${resumedJobs.length} active jobs.`);
+      } else {
+        console.log('[PROCESS_JOB_RECOVERY_COMPLETED] No pending active jobs found in PostgreSQL.');
       }
     } catch (err) {
-      console.warn('[OcrWorker] Could not resume pending jobs on startup:', err);
+      console.error('[PROCESS_JOB_RECOVERY_FAILED] Could not resume pending jobs on startup:', err);
     } finally {
       this.isResumingQueue = false;
     }
+    return resumedJobs;
   }
 
   /**
@@ -105,37 +125,169 @@ export class OcrBackgroundWorker {
           throw new Error('Không thể tải tệp tin từ bộ lưu trữ riêng tư.');
         }
 
-        // 6. Update step: Sending to Azure Document Intelligence
+        const mimeType = fileData.mimeType || document.mime_type || 'application/pdf';
+        const pdeEnabled = process.env.PROCESSING_DECISION_ENGINE_ENABLED !== 'false';
+        let analysisResult: OCRAnalysisResult;
+
+        if (pdeEnabled) {
+          // PHASE 5: Processing Decision Engine & Page-Level Routing
+          const dbPages = await db.getDocumentPages(userId, documentId);
+
+          if (dbPages && dbPages.length > 0) {
+            let plan: DocumentProcessingPlan;
+
+            // Idempotency / Restart Check: check if all pages already have valid stored PDE decisions
+            const hasExistingDecisions = dbPages.every(
+              (p) => Boolean(p.processing_strategy) && p.decision_version === PDE_VERSION
+            );
+
+            if (hasExistingDecisions) {
+              console.log(`[OcrWorker] Reusing existing persisted ${PDE_VERSION} decisions for doc ${documentId}`);
+              plan = {
+                documentId,
+                totalPages: dbPages.length,
+                localPages: dbPages.filter((p) => p.processing_strategy === 'LOCAL_NATIVE').length,
+                azurePages: dbPages.filter((p) => p.processing_strategy === 'AZURE_FULL_PAGE' || p.processing_strategy === 'AZURE_FALLBACK').length,
+                hybridPages: dbPages.filter((p) => p.processing_strategy === 'HYBRID').length,
+                recheckPages: dbPages.filter((p) => p.processing_strategy === 'LOCAL_RECHECK').length,
+                estimatedAzurePages: dbPages.filter((p) => p.requires_azure).length,
+                decisionVersion: PDE_VERSION,
+                decisions: dbPages.map((p) => ({
+                  pageNumber: p.page_number,
+                  classification: p.classification,
+                  preferredStrategy: p.processing_strategy!,
+                  fallbackStrategy: p.fallback_strategy || undefined,
+                  requiresAzure: Boolean(p.requires_azure),
+                  requiresLocalExtraction: Boolean(p.processing_strategy === 'LOCAL_NATIVE' || p.processing_strategy === 'HYBRID' || p.processing_strategy === 'LOCAL_RECHECK'),
+                  requiresRegionAnalysis: Boolean(p.requires_region_analysis),
+                  requiresSecondPass: false,
+                  decisionReason: p.decision_reason || 'Tái sử dụng quyết định đã lưu từ trước.',
+                  decisionVersion: p.decision_version || PDE_VERSION,
+                })),
+              };
+            } else {
+              await db.updateProcessingJob(userId, jobId, {
+                current_step: 'Đang thiết lập kế hoạch định tuyến xử lý từng trang (Decision Engine)...',
+                progress: 30,
+              });
+
+              plan = processingDecisionEngine.buildProcessingPlan(documentId, dbPages);
+
+              // Persist decisions to document_pages
+              await db.updateDocumentPageDecisions(
+                documentId,
+                plan.decisions.map((d) => ({
+                  page_number: d.pageNumber,
+                  processing_strategy: d.preferredStrategy,
+                  fallback_strategy: d.fallbackStrategy,
+                  requires_azure: d.requiresAzure,
+                  requires_region_analysis: d.requiresRegionAnalysis,
+                  decision_reason: d.decisionReason,
+                  decision_version: d.decisionVersion,
+                }))
+              );
+            }
+
+            await db.updateProcessingJob(userId, jobId, {
+              current_step: `Đang thực thi kế hoạch: ${plan.localPages} trang cục bộ, ${plan.azurePages + plan.hybridPages} trang Azure...`,
+              progress: 45,
+            });
+
+            try {
+              const executor = new ProcessingExecutor(this.provider);
+              analysisResult = await executor.executePlan(
+                documentId,
+                userId,
+                fileData.buffer,
+                mimeType,
+                plan,
+                { outputType: document.output_type || 'EXCEL' }
+              );
+            } catch (pdeExecErr: any) {
+              const azureSucceeded = pdeExecErr?.azurePagesSucceeded ?? 0;
+              if (azureSucceeded > 0) {
+                console.warn(
+                  `[PDE_FALLBACK_SUPPRESSED_AFTER_PARTIAL_EXTERNAL_SUCCESS] doc: ${documentId}, azureSucceeded: ${azureSucceeded}. Suppressing whole-document fallback to prevent duplicate Azure calls.`
+                );
+                // Suppress whole-document fallback: throw error so retry mechanism resumes the SAME plan cleanly without duplicate billing
+                throw new Error(
+                  `Lỗi xử lý từng trang sau khi đã hoàn tất ${azureSucceeded} trang Azure: ${pdeExecErr.message || 'Lỗi không xác định'}`
+                );
+              }
+
+              console.warn(
+                `[PDE_FALLBACK_BEFORE_EXTERNAL_CALL] doc: ${documentId}, error: ${pdeExecErr.message}. Triggering safe legacy whole-document Azure fallback.`
+              );
+              analysisResult = await this.provider.analyzeDocument(fileData.buffer, mimeType, {
+                modelId: 'prebuilt-layout',
+              });
+            }
+          } else {
+            // Document has no preflight pages (e.g. historical legacy document)
+            console.log(`[OcrWorker] Document ${documentId} has no document_pages records. Processing via legacy whole-document path.`);
+            await db.updateProcessingJob(userId, jobId, {
+              current_step: 'Đang gửi tài liệu tới Azure AI Document Intelligence...',
+              progress: 45,
+            });
+            analysisResult = await this.provider.analyzeDocument(fileData.buffer, mimeType, {
+              modelId: 'prebuilt-layout',
+            });
+          }
+        } else {
+          // Feature flag disabled -> legacy path
+          await db.updateProcessingJob(userId, jobId, {
+            current_step: 'Đang gửi tài liệu tới Azure AI Document Intelligence...',
+            progress: 45,
+          });
+          analysisResult = await this.provider.analyzeDocument(fileData.buffer, mimeType, {
+            modelId: 'prebuilt-layout',
+          });
+        }
+
+        // 8. Update step: Deterministic Validation Engine (Phase 6)
         await db.updateProcessingJob(userId, jobId, {
-          current_step: 'Đang gửi tài liệu tới Azure AI Document Intelligence...',
-          progress: 45,
+          current_step: 'Đang thực hiện kiểm định cấu trúc dữ liệu và chất lượng trích xuất...',
+          progress: 85,
         });
 
-        // 7. Analyze Document with Azure / DocumentAIProvider
-        const analysisResult = await this.provider.analyzeDocument(
-          fileData.buffer,
-          fileData.mimeType || document.mime_type || 'application/pdf',
-          { modelId: 'prebuilt-layout' }
-        );
+        // Run deterministic Validation Engine
+        const validationReport = ValidationEngine.validate(documentId, analysisResult);
 
-        // 8. Update step: Parsing tables, columns, rows & confidence
-        await db.updateProcessingJob(userId, jobId, {
-          current_step: 'Đang phân tích cấu trúc bảng, dòng, cột và điểm tin cậy...',
-          progress: 80,
-        });
+        // 9. Save structured OCR results and validation atomically into PostgreSQL
+        await db.saveOcrAnalysis(userId, documentId, analysisResult, validationReport);
 
-        // 9. Save structured OCR results into Database with strict user isolation and compensating rollback
-        await db.saveOcrAnalysis(userId, documentId, analysisResult);
+        // 10. Phase 7: Targeted Secondary OCR & Conflict Resolution (if review required)
+        if (validationReport.status === 'REVIEW_REQUIRED' && validationReport.reviewRequiredCount > 0) {
+          try {
+            await db.updateProcessingJob(userId, jobId, {
+              current_step: 'Đang thực hiện nhận diện bổ sung vùng dữ liệu và giải quyết xung đột...',
+              progress: 92,
+            });
 
-        // 10. Check confidence metrics to determine if review is required
-        const ocrData = await db.getDocumentOcrResult(userId, documentId);
-        const requiresReview = (ocrData?.stats?.lowConfidenceCount ?? 0) > 0 || (ocrData?.tables?.length ?? 0) > 0;
-        const finalStatus = requiresReview ? 'REVIEW_REQUIRED' : 'READY';
-        const stepDescription = requiresReview
-          ? 'Trích xuất hoàn tất. Cần đối soát dữ liệu bảng và các ô nghi vấn.'
-          : 'Trích xuất thành công. Độ tin cậy cao, sẵn sàng xuất dữ liệu.';
+            const secondaryCoordinator = new SecondaryOcrCoordinator();
+            const resolutionSummary = await secondaryCoordinator.processDocumentCells(
+              userId,
+              documentId,
+              fileData.buffer,
+              mimeType
+            );
 
-        // 11. Finalize Job & Document Status
+            console.log(
+              `[OcrWorker] Phase 7 Targeted Secondary OCR completed for doc ${documentId}: ` +
+              `processed ${resolutionSummary.processedCount}, resolved ${resolutionSummary.resolvedCount}, remaining unresolved ${resolutionSummary.unresolvedCount}`
+            );
+          } catch (secOcrErr: any) {
+            console.warn(`[OcrWorker] Phase 7 Secondary OCR encountered an error for doc ${documentId}, continuing to review workspace:`, secOcrErr.message || secOcrErr);
+          }
+        }
+
+        // 11. Finalize Job & Document Status based on authoritative DB status
+        const updatedDoc = await db.getDocument(userId, documentId);
+        const finalStatus: 'READY' | 'REVIEW_REQUIRED' = updatedDoc?.status === 'REVIEW_REQUIRED' ? 'REVIEW_REQUIRED' : 'READY';
+        const stepDescription = finalStatus === 'REVIEW_REQUIRED'
+          ? `Trích xuất hoàn tất. Phát hiện các ô cần kiểm tra đối soát.`
+          : 'Trích xuất và kiểm định thành công. Dữ liệu sẵn sàng xuất Excel.';
+
         const updatedJob = await db.updateProcessingJob(userId, jobId, {
           status: finalStatus,
           current_step: stepDescription,

@@ -11,6 +11,26 @@ const getApiBase = (): string => {
 
 const API_BASE = getApiBase();
 
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  validationIssues?: any[];
+  blockingCount?: number;
+  blockingCells?: any[];
+  raw?: any;
+
+  constructor(message: string, status: number, data?: any) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = data?.code;
+    this.validationIssues = data?.validationIssues;
+    this.blockingCount = data?.blockingCount;
+    this.blockingCells = data?.blockingCells;
+    this.raw = data;
+  }
+}
+
 class ApiClient {
   private getToken(): string | null {
     return localStorage.getItem('docconvert_token');
@@ -31,7 +51,8 @@ class ApiClient {
   private async handleResponse<T>(res: Response): Promise<T> {
     const data = await res.json().catch(() => ({ error: 'Không thể xử lý phản hồi từ máy chủ' }));
     if (!res.ok) {
-      throw new Error(data.error || `Lỗi yêu cầu: mã trạng thái ${res.status}`);
+      const message = data.message || data.error || `Lỗi yêu cầu: mã trạng thái ${res.status}`;
+      throw new ApiError(message, res.status, data);
     }
     return data;
   }

@@ -24,9 +24,10 @@ import {
   GripVertical,
   Maximize2,
   Minimize2,
+  Eye,
 } from 'lucide-react';
 import { DocumentItem, DocumentOCRData, ExtractedTable, ExtractedRow, ExtractedCell, OCRMetadataItem, UnifiedTransactionTable, UnifiedRow, UnifiedCell } from '../../types';
-import { api } from '../../services/api';
+import { api, ApiError } from '../../services/api';
 import { StatusBadge } from '../common/StatusBadge';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 
@@ -38,6 +39,66 @@ export interface DocumentMetadataItem {
   sourcePage?: number;
   boundingPolygon?: number[];
 }
+
+export type FrontendCellState =
+  | 'CLEAN'
+  | 'AUTO_RESOLVED'
+  | 'REVIEW_REQUIRED'
+  | 'HUMAN_RESOLVED'
+  | 'WARNING_ONLY';
+
+/**
+ * Phase 8 Canonical Frontend Cell State Derivation
+ * Strictly uses existing persisted fields without inventing fake backend enum values.
+ */
+export const deriveCellState = (cell: UnifiedCell | ExtractedCell | any): FrontendCellState => {
+  if (!cell || cell.isPlaceholder) return 'CLEAN';
+
+  const resStatus = cell.resolutionStatus;
+  const resMethod = cell.resolutionMethod;
+  const valStatus = cell.validationStatus;
+  const qa = cell.qualityAssessment;
+
+  // 1. HUMAN_RESOLVED: Human confirmed or edited value via Phase 7/8 architecture
+  if (resStatus === 'RESOLVED' && resMethod === 'HUMAN') {
+    return 'HUMAN_RESOLVED';
+  }
+
+  // 2. AUTO_RESOLVED: AI automatically resolved via Secondary OCR or Gemini
+  if (
+    resStatus === 'RESOLVED' &&
+    ['DETERMINISTIC', 'SECONDARY_OCR', 'SECONDARY_OCR_ENHANCED', 'GEMINI'].includes(resMethod)
+  ) {
+    return 'AUTO_RESOLVED';
+  }
+
+  // 3. REVIEW_REQUIRED: Must block Completion Gate (PENDING, UNRESOLVED, HUMAN_REVIEW_REQUIRED, or REVIEW_REQUIRED)
+  if (
+    valStatus === 'REVIEW_REQUIRED' ||
+    ['PENDING', 'UNRESOLVED', 'HUMAN_REVIEW_REQUIRED'].includes(resStatus)
+  ) {
+    return 'REVIEW_REQUIRED';
+  }
+
+  // Legacy/Quality severity fallback for unreviewed critical defects
+  if (!cell.isReviewed) {
+    if (qa?.severity === 'CRITICAL' || (typeof cell.confidence === 'number' && cell.confidence < 0.7)) {
+      return 'REVIEW_REQUIRED';
+    }
+  }
+
+  // 4. WARNING_ONLY: Non-blocking warning (format outlier, mild warning)
+  if (
+    valStatus === 'WARNING' ||
+    qa?.severity === 'WARNING' ||
+    (typeof cell.confidence === 'number' && cell.confidence >= 0.7 && cell.confidence < 0.85)
+  ) {
+    return 'WARNING_ONLY';
+  }
+
+  // 5. CLEAN: Accepted and valid
+  return 'CLEAN';
+};
 
 // Friendly Vietnamese labels for recognized banking semantic types
 const SEMANTIC_VI_LABELS: Record<string, string> = {
@@ -94,6 +155,18 @@ export const QUALITY_REASON_LABELS: Record<string, string> = {
   STT_TEXT_CONTAMINATION: 'Chứa văn bản trong ô số thứ tự',
   STT_NON_INTEGER: 'Số thứ tự không phải số nguyên',
   CORRUPT_CHARACTERS: 'Chứa ký tự điều khiển hoặc ký tự lạ',
+  // Phase 6 Validation Engine codes
+  LOW_STRUCTURE_CONFIDENCE: 'Độ tin cậy cấu trúc bảng vector thấp',
+  INVALID_DATE: 'Định dạng hoặc giá trị ngày tháng không hợp lệ',
+  INVALID_MONEY: 'Định dạng số tiền không hợp lệ',
+  INVALID_NUMBER: 'Định dạng số không hợp lệ',
+  INVALID_EMAIL: 'Định dạng email không đúng chuẩn',
+  INVALID_PHONE: 'Số điện thoại không hợp lý',
+  TYPE_MISMATCH: 'Kiểu dữ liệu ô không khớp với nội dung',
+  EMPTY_REQUIRED_VALUE: 'Ô bắt buộc bị bỏ trống',
+  COLUMN_COUNT_MISMATCH: 'Số cột của dòng không khớp với bảng',
+  TABLE_STRUCTURE_ANOMALY: 'Bất thường cấu trúc bảng',
+  LOGICAL_RULE_FAILED: 'Quy tắc logic nghiệp vụ không thỏa mãn',
 };
 
 export const formatQualityReason = (reason: { code: string; message?: string }): string => {
@@ -104,14 +177,11 @@ export const formatQualityReason = (reason: { code: string; message?: string }):
  * Shared single-source predicate for generic human review.
  * A cell requires human review IF AND ONLY IF:
  * 1. It is not a placeholder cell
- * 2. It has not been reviewed by a human (isReviewed !== true)
- * 3. Its machine quality assessment severity is WARNING or CRITICAL
+ * 2. Its derived state is REVIEW_REQUIRED
  */
 export const isUnifiedCellNeedsReview = (cell: UnifiedCell | any): boolean => {
   if (!cell || cell.isPlaceholder) return false;
-  if (cell.isReviewed === true) return false;
-  const severity = cell.qualityAssessment?.severity;
-  return severity === 'WARNING' || severity === 'CRITICAL';
+  return deriveCellState(cell) === 'REVIEW_REQUIRED';
 };
 
 // Backwards-compatible alias for existing test scripts
@@ -193,11 +263,22 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
   const [editType, setEditType] = useState<'TEXT' | 'MONEY' | 'DATE' | 'NUMBER'>('TEXT');
   const [isSavingCell, setIsSavingCell] = useState(false);
   const [confirmingCellId, setConfirmingCellId] = useState<string | null>(null);
+  const [cellEditError, setCellEditError] = useState<string | null>(null);
+
+  // Review Queue & Filter Tabs State
+  const [reviewFilterTab, setReviewFilterTab] = useState<'ALL' | 'REVIEW_REQUIRED' | 'AUTO_RESOLVED' | 'HUMAN_RESOLVED' | 'WARNING_ONLY'>('ALL');
+  const [currentIssueIndex, setCurrentIssueIndex] = useState(0);
 
   // Filter & Search State
   const [filterLowConfidenceOnly, setFilterLowConfidenceOnly] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isTableFocused, setIsTableFocused] = useState(false);
+
+  // Blocking Error Modal State
+  const [blockingErrorModal, setBlockingErrorModal] = useState<{
+    blockingCount: number;
+    blockingCells: any[];
+  } | null>(null);
 
 
   // Action States
@@ -353,16 +434,19 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
     setEditingCellId(cell.id);
     setEditValue(cell.rawValue || '');
     setEditType((cell.cellType as any) || 'TEXT');
+    setCellEditError(null);
   };
 
   const cancelEditCell = () => {
     setEditingCellId(null);
     setEditValue('');
+    setCellEditError(null);
   };
 
   const saveCellEdit = async () => {
-    if (!editingCellId || !ocrData) return;
+    if (!editingCellId || !ocrData || isSavingCell) return;
     setIsSavingCell(true);
+    setCellEditError(null);
     try {
       const res = await api.updateExtractedCell(documentId, editingCellId, {
         rawValue: editValue,
@@ -374,24 +458,32 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
       }
 
       // Re-fetch fresh OCR result from backend to recompute UnifiedTable and dynamic CellQualityEvaluator
-      try {
-        await loadOcrData(true);
-        setEditingCellId(null);
-        setSuccessMessage('Đã lưu chỉnh sửa và làm mới đánh giá chất lượng.');
-        setTimeout(() => setSuccessMessage(null), 2500);
-      } catch (refetchErr: any) {
-        setEditingCellId(null);
-        alert('Đã lưu dữ liệu ô thành công, nhưng không thể làm mới đánh giá chất lượng: ' + (refetchErr.message || 'Lỗi mạng.'));
-      }
+      await loadOcrData(true);
+      setEditingCellId(null);
+      setCellEditError(null);
+      setSuccessMessage('Đã lưu chỉnh sửa và cập nhật trạng thái người dùng đối soát.');
+      setTimeout(() => setSuccessMessage(null), 2500);
     } catch (err: any) {
-      alert(err.message || 'Lỗi khi lưu ô.');
+      if (err.status === 422 || err.code === 'HUMAN_EDIT_VALIDATION_FAILED') {
+        const issuesMsg = err.validationIssues?.length
+          ? err.validationIssues.map((i: any) => i.message || i.code).join('; ')
+          : (err.message || 'Giá trị chỉnh sửa không hợp lệ theo quy tắc kiểm tra.');
+        setCellEditError(issuesMsg);
+        // Do NOT close editingCellId so user can fix their input!
+      } else if (err.status === 400 && err.code === 'CANNOT_EDIT_PLACEHOLDER_CELL') {
+        alert('Không thể chỉnh sửa ô giả lập.');
+        setEditingCellId(null);
+        setCellEditError(null);
+      } else {
+        setCellEditError(err.message || 'Lỗi khi lưu ô.');
+      }
     } finally {
       setIsSavingCell(false);
     }
   };
 
   const handleConfirmCell = async (cell: ExtractedCell | UnifiedCell) => {
-    if (!cell.id || (cell as UnifiedCell).isPlaceholder) return;
+    if (!cell.id || (cell as UnifiedCell).isPlaceholder || confirmingCellId) return;
     setConfirmingCellId(cell.id);
     try {
       const res = await api.confirmExtractedCell(documentId, cell.id);
@@ -399,16 +491,17 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
         throw new Error(res.message || 'Không thể xác nhận ô dữ liệu.');
       }
 
-      // Re-fetch fresh OCR result from backend to rebuild UnifiedTable with updated isReviewed
-      try {
-        await loadOcrData(true);
-        setSuccessMessage('Đã xác nhận giá trị ô đúng theo tài liệu gốc.');
-        setTimeout(() => setSuccessMessage(null), 2500);
-      } catch (refetchErr: any) {
-        alert('Đã xác nhận ô dữ liệu thành công trên máy chủ, nhưng không thể làm mới bảng hiển thị: ' + (refetchErr.message || 'Lỗi mạng.'));
-      }
+      // Re-fetch fresh authoritative OCR result from backend
+      await loadOcrData(true);
+      setSuccessMessage('Đã xác nhận giá trị ô đúng theo tài liệu gốc.');
+      setTimeout(() => setSuccessMessage(null), 2500);
     } catch (err: any) {
-      alert(err.message || 'Lỗi khi xác nhận ô dữ liệu.');
+      if (err.status === 409 || err.code === 'CURRENT_VALUE_CANDIDATE_MISMATCH') {
+        alert('Dữ liệu hiện tại không đồng bộ với lịch sử xử lý. Đang làm mới dữ liệu...');
+        await loadOcrData(true);
+      } else {
+        alert(err.message || 'Lỗi khi xác nhận ô dữ liệu.');
+      }
     } finally {
       setConfirmingCellId(null);
     }
@@ -429,10 +522,11 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
 
   // --- 6. ACTION WORKFLOWS ---
   const handleRerunOcr = async () => {
+    if (isRetryingOcr) return;
     setIsRetryingOcr(true);
     try {
       await api.triggerDocumentOcr(documentId);
-      setSuccessMessage('Đã gửi tài liệu vào hàng đợi xử lý Azure AI.');
+      setSuccessMessage('Đã kích hoạt lại tiến trình xử lý OCR.');
       setTimeout(() => {
         loadOcrData();
         setIsRetryingOcr(false);
@@ -444,16 +538,27 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
   };
 
   const handleCompleteReview = async () => {
+    if (isCompletingReview) return;
     setIsCompletingReview(true);
     try {
       const res = await api.completeDocumentReview(documentId);
-      if (res.success && onDocumentUpdated) {
-        onDocumentUpdated(res.document);
+      if (res.success && res.document) {
+        if (onDocumentUpdated) {
+          onDocumentUpdated(res.document);
+        }
+        await loadOcrData(true);
+        setSuccessMessage('Đã hoàn tất đối soát! Tài liệu đã sẵn sàng xuất dữ liệu.');
+        setTimeout(() => setSuccessMessage(null), 3000);
       }
-      setSuccessMessage('Đã hoàn tất đối soát! Tài liệu đã sẵn sàng xuất dữ liệu.');
-      await loadOcrData();
     } catch (err: any) {
-      alert(err.message || 'Lỗi khi hoàn tất đối soát.');
+      if (err.status === 400 && err.code === 'BLOCKING_CELLS_REMAIN') {
+        setBlockingErrorModal({
+          blockingCount: err.blockingCount || (err.blockingCells?.length ?? 1),
+          blockingCells: err.blockingCells || [],
+        });
+      } else {
+        alert(err.message || 'Lỗi khi hoàn tất đối soát.');
+      }
     } finally {
       setIsCompletingReview(false);
     }
@@ -554,18 +659,25 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
   // Filtered rows for display according to Search and Low-Confidence Filter
   const displayedRows = useMemo(() => {
     return dataRows.filter((row: any) => {
-      // 1. Review filter condition: row must contain at least one real cell needing review
+      // 1. Filter by Review Tab (ALL / REVIEW_REQUIRED / AUTO_RESOLVED / HUMAN_RESOLVED / WARNING_ONLY)
+      if (reviewFilterTab !== 'ALL') {
+        const hasMatchingCell = row.cells?.some((c: any) => {
+          if (!c || c.isPlaceholder) return false;
+          return deriveCellState(c) === reviewFilterTab;
+        });
+        if (!hasMatchingCell) return false;
+      }
+
+      // 2. Review filter condition: row must contain at least one real cell needing review
       if (filterLowConfidenceOnly) {
         const hasSuspiciousCell = row.cells?.some((c: any) => {
-          if (isUnified) {
-            return isUnifiedCellNeedsReview(c);
-          }
-          return isLegacyCellReviewWorthy(c);
+          if (!c || c.isPlaceholder) return false;
+          return deriveCellState(c) === 'REVIEW_REQUIRED';
         });
         if (!hasSuspiciousCell) return false;
       }
 
-      // 2. Search query condition: row must match search text or page
+      // 3. Search query condition: row must match search text or page
       if (searchQuery) {
         const q = searchQuery.toLowerCase().trim();
         // Allow page query: "trang 2" or "p2" in unified mode
@@ -581,7 +693,7 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
 
       return true;
     });
-  }, [dataRows, filterLowConfidenceOnly, searchQuery, isUnified]);
+  }, [dataRows, reviewFilterTab, filterLowConfidenceOnly, searchQuery, isUnified]);
 
   // Reviewed count & metrics calculation
   const metrics = useMemo(() => {
@@ -717,6 +829,57 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
     }
     return null;
   }, [selectedCellId, isUnified, unifiedTable, activeTable]);
+
+  // Phase 8 Review Queue: Sorted list of all cells needing user attention
+  const reviewQueueCells = useMemo(() => {
+    const list: Array<{ cell: UnifiedCell | ExtractedCell; rowIndex: number; pageNumber?: number }> = [];
+    if (isUnified && unifiedTable) {
+      unifiedTable.rows.forEach((r) => {
+        r.cells.forEach((c) => {
+          if (!c.isPlaceholder && deriveCellState(c) === 'REVIEW_REQUIRED') {
+            list.push({ cell: c, rowIndex: r.displayRowIndex, pageNumber: r.sourcePage });
+          }
+        });
+      });
+    } else if (activeTable?.rows) {
+      activeTable.rows.forEach((r) => {
+        r.cells.forEach((c) => {
+          if (!c.isPlaceholder && deriveCellState(c) === 'REVIEW_REQUIRED') {
+            list.push({ cell: c, rowIndex: r.rowIndex, pageNumber: activeTable.pageNumber });
+          }
+        });
+      });
+    }
+    return list;
+  }, [isUnified, unifiedTable, activeTable]);
+
+  // Navigation handlers for Review Queue
+  const jumpToReviewIssue = (index: number) => {
+    if (reviewQueueCells.length === 0) return;
+    const targetIdx = (index + reviewQueueCells.length) % reviewQueueCells.length;
+    setCurrentIssueIndex(targetIdx);
+    const target = reviewQueueCells[targetIdx];
+    if (target?.cell?.id) {
+      setSelectedCellId(target.cell.id);
+      if (target.pageNumber) {
+        setSelectedPageNumber(target.pageNumber);
+      }
+      setTimeout(() => {
+        const el = document.getElementById(`cell-${target.cell.id}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+        }
+      }, 50);
+    }
+  };
+
+  const handleNextIssue = () => {
+    jumpToReviewIssue(currentIssueIndex + 1);
+  };
+
+  const handlePrevIssue = () => {
+    jumpToReviewIssue(currentIssueIndex - 1);
+  };
 
   // --- METADATA SELECTION & DYNAMIC PRESENTATION ---
   const metadataItems: OCRMetadataItem[] = useMemo(() => {
@@ -865,6 +1028,38 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
                   {ocrData?.document?.original_filename || 'Tài liệu Đối Soát OCR'}
                 </h2>
                 {ocrData?.document && <StatusBadge status={ocrData.document.status} size="sm" />}
+                {ocrData?.document && (
+                  <div className="flex items-center gap-1.5">
+                    {ocrData.document.review_status === 'REVIEWED' ? (
+                      <span
+                        id="badge-doc-review-status"
+                        className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-700/80 flex items-center gap-1 shadow-xs"
+                        title={ocrData.document.reviewed_at ? `Hoàn tất lúc: ${new Date(ocrData.document.reviewed_at).toLocaleString('vi-VN')}` : 'Đã hoàn tất đối soát'}
+                      >
+                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                        <span>Đã đối soát</span>
+                      </span>
+                    ) : ocrData.document.review_status === 'IN_PROGRESS' ? (
+                      <span
+                        id="badge-doc-review-status"
+                        className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-950/90 text-amber-300 border border-amber-700/80 flex items-center gap-1 shadow-xs"
+                        title="Đang trong tiến trình đối soát"
+                      >
+                        <RefreshCw className="w-2.5 h-2.5 text-amber-400 animate-spin" />
+                        <span>Đang đối soát</span>
+                      </span>
+                    ) : (
+                      <span
+                        id="badge-doc-review-status"
+                        className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-slate-800 text-slate-300 border border-slate-700 flex items-center gap-1 shadow-xs"
+                        title="Tài liệu chưa được đối soát"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
+                        <span>Chưa đối soát</span>
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
               <p className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
                 <span>Trạng thái đối soát dữ liệu bảng</span>
@@ -918,12 +1113,16 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
             <button
               id="btn-complete-review"
               onClick={handleCompleteReview}
-              disabled={isCompletingReview}
-              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-950/80 hover:bg-emerald-900/80 text-emerald-300 border border-emerald-800/80 flex items-center gap-1.5 transition disabled:opacity-50"
-              title="Đánh dấu tài liệu đã hoàn tất đối soát"
+              disabled={isCompletingReview || ocrData?.document?.review_status === 'REVIEWED'}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition ${
+                ocrData?.document?.review_status === 'REVIEWED'
+                  ? 'bg-emerald-950/40 text-emerald-400/80 border border-emerald-800/40 cursor-default'
+                  : 'bg-emerald-950/80 hover:bg-emerald-900/80 text-emerald-300 border border-emerald-800/80 shadow-xs'
+              } disabled:opacity-60`}
+              title={ocrData?.document?.review_status === 'REVIEWED' ? 'Tài liệu đã hoàn tất đối soát' : 'Đánh dấu tài liệu đã hoàn tất đối soát'}
             >
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-              <span>{isCompletingReview ? 'Đang lưu...' : 'Hoàn tất đối soát'}</span>
+              <span>{isCompletingReview ? 'Đang lưu...' : ocrData?.document?.review_status === 'REVIEWED' ? 'Đã hoàn tất đối soát' : 'Hoàn tất đối soát'}</span>
             </button>
 
             {/* Primary Action 2: Export Excel (.XLSX) */}
@@ -1043,6 +1242,107 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
                   <Download className="w-3.5 h-3.5" />
                   <span>{isExportingExcel ? 'Đang tạo Excel...' : 'Tải tệp .xlsx'}</span>
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* BLOCKING CELLS ERROR MODAL (REVIEW COMPLETION GATE) */}
+        {blockingErrorModal && (
+          <div
+            id="modal-blocking-cells-gate"
+            className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs"
+          >
+            <div className="bg-slate-900 border border-rose-800/80 rounded-2xl shadow-2xl max-w-lg w-full p-6 text-slate-100">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/30 flex items-center justify-center font-bold">
+                    <AlertCircle className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-100">Chưa thể hoàn tất đối soát</h3>
+                    <p className="text-xs text-rose-300">
+                      Còn {blockingErrorModal.blockingCount} ô dữ liệu có lỗi hoặc chưa được kiểm tra
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setBlockingErrorModal(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-200 rounded-lg hover:bg-slate-800 transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-300 mb-4 leading-relaxed">
+                Hệ thống yêu cầu tất cả các ô có lỗi định dạng, xung đột hoặc trạng thái chờ xử lý phải được giải quyết hoặc xác nhận trước khi khóa trạng thái tài liệu.
+              </p>
+
+              {blockingErrorModal.blockingCells.length > 0 && (
+                <div className="mb-5 max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                  {blockingErrorModal.blockingCells.slice(0, 5).map((b, idx) => (
+                    <div
+                      key={idx}
+                      className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 text-xs flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-semibold text-slate-200 truncate">
+                          Trang {b.pageNumber || 1} · Dòng {(b.rowIndex ?? 0) + 1}: &quot;{b.rawValue || '—'}&quot;
+                        </div>
+                        <div className="text-[11px] text-rose-400 mt-0.5">{b.reason}</div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setBlockingErrorModal(null);
+                          setSelectedCellId(b.cellId);
+                          if (b.pageNumber) setSelectedPageNumber(b.pageNumber);
+                          setTimeout(() => {
+                            const el = document.getElementById(`cell-${b.cellId}`);
+                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          }, 50);
+                        }}
+                        className="px-2.5 py-1 text-[11px] font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-md shrink-0 transition"
+                      >
+                        Kiểm tra
+                      </button>
+                    </div>
+                  ))}
+                  {blockingErrorModal.blockingCount > 5 && (
+                    <div className="text-center text-[11px] text-slate-500 pt-1">
+                      và {blockingErrorModal.blockingCount - 5} ô dữ liệu khác...
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setBlockingErrorModal(null)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-xl transition"
+                >
+                  Đóng
+                </button>
+                {blockingErrorModal.blockingCells.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const first = blockingErrorModal.blockingCells[0];
+                      setBlockingErrorModal(null);
+                      if (first?.cellId) {
+                        setSelectedCellId(first.cellId);
+                        if (first.pageNumber) setSelectedPageNumber(first.pageNumber);
+                        setTimeout(() => {
+                          const el = document.getElementById(`cell-${first.cellId}`);
+                          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }, 50);
+                      }
+                    }}
+                    className="px-5 py-2 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-xl shadow-sm flex items-center gap-1.5 transition"
+                  >
+                    <span>Kiểm tra ô lỗi đầu tiên</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -1421,9 +1721,83 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
                   </div>
                 )}
 
+                {/* Review Queue Navigation Bar */}
+                <div className="flex items-center justify-between gap-2 bg-slate-950 p-2 rounded-xl border border-slate-800 text-xs flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-slate-300 flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Hàng đợi đối soát:</span>
+                    </span>
+                    <span
+                      id="badge-queue-count"
+                      className={`px-2 py-0.5 rounded-full font-bold text-[11px] ${
+                        reviewQueueCells.length > 0
+                          ? 'bg-rose-950/80 text-rose-300 border border-rose-800/80'
+                          : 'bg-emerald-950/80 text-emerald-300 border border-emerald-800/80'
+                      }`}
+                    >
+                      {reviewQueueCells.length > 0 ? `${reviewQueueCells.length} ô cần xử lý` : '0 ô cần xử lý (Sạch)'}
+                    </span>
+                  </div>
+
+                  {reviewQueueCells.length > 0 && (
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        id="btn-queue-prev"
+                        onClick={handlePrevIssue}
+                        className="px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 flex items-center gap-1 text-[11px] font-semibold transition cursor-pointer"
+                        title="Chuyển đến ô cần đối soát trước đó"
+                      >
+                        <ChevronLeft className="w-3.5 h-3.5" />
+                        <span>Trước</span>
+                      </button>
+                      <span className="text-[11px] text-slate-400 font-mono px-2">
+                        {currentIssueIndex + 1} / {reviewQueueCells.length}
+                      </span>
+                      <button
+                        type="button"
+                        id="btn-queue-next"
+                        onClick={handleNextIssue}
+                        className="px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 flex items-center gap-1 text-[11px] font-semibold transition cursor-pointer"
+                        title="Chuyển đến ô cần đối soát tiếp theo"
+                      >
+                        <span>Sau</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
                 {/* Filter & Search Bar */}
-                <div className="flex items-center gap-2.5">
-                  <div className="relative flex-1 min-w-0">
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  {/* Category Filter Tabs */}
+                  <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs shrink-0">
+                    {(
+                      [
+                        { id: 'ALL', label: 'Tất cả' },
+                        { id: 'REVIEW_REQUIRED', label: 'Cần kiểm tra' },
+                        { id: 'AUTO_RESOLVED', label: 'Đã AI xử lý' },
+                        { id: 'HUMAN_RESOLVED', label: 'Đã người dùng xử lý' },
+                        { id: 'WARNING_ONLY', label: 'Cảnh báo' },
+                      ] as const
+                    ).map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setReviewFilterTab(tab.id)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition cursor-pointer ${
+                          reviewFilterTab === tab.id
+                            ? 'bg-blue-600 text-white shadow-xs'
+                            : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="relative flex-1 min-w-[160px]">
                     <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
                     <input
                       type="text"
@@ -1442,42 +1816,6 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
                       </button>
                     )}
                   </div>
-
-                  <button
-                    onClick={() => setFilterLowConfidenceOnly(!filterLowConfidenceOnly)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold border flex items-center gap-1.5 transition shrink-0 ${
-                      filterLowConfidenceOnly
-                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-sm shadow-amber-500/10'
-                        : reviewStats.totalReviewCount > 0
-                        ? 'bg-slate-950 text-slate-300 border-slate-800 hover:bg-slate-900 hover:border-slate-700'
-                        : 'bg-slate-950 text-slate-400 border-slate-800/80 hover:bg-slate-900'
-                    }`}
-                    title={filterLowConfidenceOnly ? 'Hủy lọc: hiển thị lại tất cả các dòng' : 'Chỉ lọc các dòng có ô cần kiểm tra'}
-                  >
-                    <AlertTriangle
-                      className={`w-3.5 h-3.5 ${
-                        filterLowConfidenceOnly
-                          ? 'text-amber-400'
-                          : reviewStats.totalReviewCount > 0
-                          ? reviewStats.criticalCount > 0
-                            ? 'text-rose-400'
-                            : 'text-amber-400'
-                          : 'text-slate-500'
-                      }`}
-                    />
-                    <span>
-                      {filterLowConfidenceOnly
-                        ? `Đang lọc: ${reviewStats.totalReviewCount} ô cần kiểm tra`
-                        : `${reviewStats.totalReviewCount} ô cần kiểm tra`}
-                    </span>
-                    {reviewStats.totalReviewCount > 0 && !filterLowConfidenceOnly && (
-                      <span className="text-[10px] font-normal text-slate-400 ml-0.5">
-                        ({reviewStats.warningCount > 0 ? `${reviewStats.warningCount} cần kiểm tra` : ''}
-                        {reviewStats.warningCount > 0 && reviewStats.criticalCount > 0 ? ' · ' : ''}
-                        {reviewStats.criticalCount > 0 ? `${reviewStats.criticalCount} ưu tiên kiểm tra` : ''})
-                      </span>
-                    )}
-                  </button>
 
                   {/* Focus Mode Toggle Button */}
                   <button
@@ -1608,124 +1946,119 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
                                 );
                               }
 
-                              const qa = cell.qualityAssessment;
-                              const isCritical = qa?.severity === 'CRITICAL';
-                              const isWarning = qa?.severity === 'WARNING';
-                              const isPass = qa?.severity === 'PASS';
-
-                              const hasConf = typeof cell.confidence === 'number' && cell.confidence !== null;
-                              const confPercentStr = hasConf ? `${(cell.confidence * 100).toFixed(1)}%` : 'N/A';
-                              const legacyLowConf = !qa && hasConf && cell.confidence < 0.7;
-                              const legacyMedConf = !qa && hasConf && cell.confidence >= 0.7 && cell.confidence < 0.85;
-
-                              const showCritical = isCritical || legacyLowConf;
-                              const showWarning = isWarning || legacyMedConf;
+                              const cellState = deriveCellState(cell);
                               const isEditing = editingCellId === cell.id;
                               const isSelected = selectedCellId === cell.id;
-                              const isCellReviewed = Boolean(cell.isReviewed);
-                              const needsHumanReview = isUnified ? isUnifiedCellNeedsReview(cell) : isLegacyCellReviewWorthy(cell);
                               const isConfirming = confirmingCellId === cell.id;
 
-                              const confDisplay = hasConf ? `${(cell.confidence * 100).toFixed(1)}%` : 'N/A';
-                              const sourceDisplay = cell.confidenceSource === 'AZURE_WORD_AGGREGATE'
-                                ? 'Azure OCR'
-                                : cell.confidenceSource === 'AZURE_CELL'
-                                ? 'Azure OCR (ô)'
-                                : cell.confidenceSource === 'EMPTY_CELL'
-                                ? 'Ô trống'
-                                : cell.confidenceSource === 'UNAVAILABLE'
-                                ? 'Không khả dụng'
-                                : null;
+                              const qa = cell.qualityAssessment;
+                              const valIssues = (cell as any).validationIssues || [];
+                              const hasConf = typeof cell.confidence === 'number' && cell.confidence !== null;
+                              const isLocal = (cell as any).confidenceSource === 'LOCAL_HEURISTIC' || !hasConf;
+                              const confDisplay = isLocal
+                                ? ((cell as any).structureConfidence ? `Cấu trúc ${(Number((cell as any).structureConfidence) * 100).toFixed(0)}%` : 'Trực tiếp (PDF)')
+                                : `${(cell.confidence! * 100).toFixed(1)}%`;
 
-                              let cellTooltip = `Giá trị: ${cell.rawValue ?? cell.normalizedValue ?? '—'}`;
-
-                              if (isCellReviewed) {
-                                cellTooltip += `\nTrạng thái: Đã kiểm tra`;
-                                if (qa && (isCritical || isWarning)) {
-                                  const machineSeverity = isCritical ? 'Ưu tiên kiểm tra' : 'Cần kiểm tra';
-                                  cellTooltip += ` (Đánh giá ban đầu: ${machineSeverity})`;
-                                }
-                              } else if (qa) {
-                                const statusLabel = isCritical
-                                  ? 'Ưu tiên kiểm tra'
-                                  : isWarning
-                                  ? 'Cần kiểm tra'
-                                  : 'Không phát hiện bất thường';
-                                cellTooltip += `\nTrạng thái: ${statusLabel}`;
-                              } else if (legacyLowConf) {
-                                cellTooltip += `\nTrạng thái: Ưu tiên kiểm tra (Độ tin cậy OCR < 70%)`;
-                              } else if (legacyMedConf) {
-                                cellTooltip += `\nTrạng thái: Cần kiểm tra (Độ tin cậy OCR < 85%)`;
-                              } else {
-                                cellTooltip += `\nTrạng thái: Không phát hiện bất thường`;
+                              let cellTooltip = `Giá trị hiện tại: ${cell.rawValue ?? cell.normalizedValue ?? '—'}`;
+                              if ((cell as any).originalRawValue && (cell as any).originalRawValue !== cell.rawValue) {
+                                cellTooltip += `\nGiá trị gốc: ${(cell as any).originalRawValue}`;
                               }
-
-                              if (qa?.reasons && qa.reasons.length > 0) {
-                                cellTooltip += `\nLý do:\n` + qa.reasons.map((r: any) => `• ${formatQualityReason(r)}`).join('\n');
+                              if ((cell as any).resolutionMethod) {
+                                cellTooltip += `\nPhương thức: ${(cell as any).resolutionMethod}`;
                               }
-
+                              if (valIssues.length > 0) {
+                                cellTooltip += `\nVấn đề phát hiện:\n` + valIssues.map((i: any) => `• [${i.code}] ${i.message}`).join('\n');
+                              } else if (qa?.reasons && qa.reasons.length > 0) {
+                                cellTooltip += `\nĐánh giá chất lượng:\n` + qa.reasons.map((r: any) => `• ${formatQualityReason(r)}`).join('\n');
+                              }
                               cellTooltip += `\nĐộ tin cậy OCR: ${confDisplay}`;
-                              if (sourceDisplay) {
-                                cellTooltip += `\nNguồn: ${sourceDisplay}`;
+
+                              // Background & highlight class based on derived cellState
+                              let bgHighlightClass = 'hover:bg-slate-800/40';
+                              if (isSelected) {
+                                bgHighlightClass = 'bg-blue-950/80 ring-2 ring-blue-500 z-5';
+                              } else if (cellState === 'REVIEW_REQUIRED') {
+                                bgHighlightClass = 'bg-rose-950/40 border-b border-b-rose-700/60 hover:bg-rose-950/60';
+                              } else if (cellState === 'WARNING_ONLY') {
+                                bgHighlightClass = 'bg-amber-950/25 border-b border-b-amber-700/50 hover:bg-amber-950/40';
+                              } else if (cellState === 'AUTO_RESOLVED') {
+                                bgHighlightClass = 'bg-teal-950/20 border-b border-b-teal-800/40 hover:bg-teal-950/30';
+                              } else if (cellState === 'HUMAN_RESOLVED') {
+                                bgHighlightClass = 'bg-cyan-950/25 border-b border-b-cyan-800/50 hover:bg-cyan-950/35';
                               }
 
                               return (
                                 <td
                                   key={cell.id || colIdx}
-                                  onClick={() => cell.id && setSelectedCellId(cell.id)}
-                                  onDoubleClick={() => cell.id && startEditCell(cell)}
-                                  className={`py-2 px-3 border-r border-slate-800/60 last:border-r-0 relative transition cursor-pointer min-w-[150px] ${
-                                    isSelected
-                                      ? 'bg-blue-950/80 ring-1 ring-blue-500 z-5'
-                                      : showCritical
-                                      ? isCellReviewed
-                                        ? 'bg-rose-950/15 border-b border-b-rose-900/30'
-                                        : 'bg-rose-950/30 border-b border-b-rose-800/40'
-                                      : showWarning
-                                      ? isCellReviewed
-                                        ? 'bg-amber-950/10 border-b border-b-amber-900/20'
-                                        : 'bg-amber-950/20 border-b border-b-amber-800/30'
-                                      : ''
-                                  }`}
+                                  id={cell.id ? `cell-${cell.id}` : undefined}
+                                  onClick={() => {
+                                    if (cell.id) {
+                                      setSelectedCellId(cell.id);
+                                      if (cell.sourcePage) {
+                                        setSelectedPageNumber(cell.sourcePage);
+                                      }
+                                    }
+                                  }}
+                                  onDoubleClick={() => !cell.isPlaceholder && cell.id && startEditCell(cell)}
+                                  className={`py-2 px-3 border-r border-slate-800/60 last:border-r-0 relative transition cursor-pointer min-w-[150px] ${bgHighlightClass}`}
                                 >
                                   {isEditing ? (
-                                    <div className="flex items-center gap-1.5 min-w-[180px]">
-                                      <input
-                                        type="text"
-                                        value={editValue}
-                                        onChange={(e) => setEditValue(e.target.value)}
-                                        autoFocus
-                                        onKeyDown={(e) => {
-                                          if (e.key === 'Enter') saveCellEdit();
-                                          if (e.key === 'Escape') cancelEditCell();
-                                        }}
-                                        className="flex-1 px-2 py-1 text-xs border border-blue-500 rounded bg-slate-950 text-slate-100 focus:outline-none ring-1 ring-blue-500"
-                                      />
-                                      <select
-                                        value={editType}
-                                        onChange={(e: any) => setEditType(e.target.value)}
-                                        className="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-1 text-slate-200"
-                                      >
-                                        <option value="TEXT">Chữ</option>
-                                        <option value="MONEY">Tiền VND</option>
-                                        <option value="DATE">Ngày</option>
-                                        <option value="NUMBER">Số</option>
-                                      </select>
-                                      <button
-                                        onClick={saveCellEdit}
-                                        disabled={isSavingCell}
-                                        className="p-1 bg-emerald-600 text-white rounded hover:bg-emerald-500 transition"
-                                        title="Lưu (Enter)"
-                                      >
-                                        <Check className="w-3.5 h-3.5" />
-                                      </button>
-                                      <button
-                                        onClick={cancelEditCell}
-                                        className="p-1 bg-slate-800 text-slate-400 rounded hover:text-white transition"
-                                        title="Hủy (Esc)"
-                                      >
-                                        <X className="w-3.5 h-3.5" />
-                                      </button>
+                                    <div className="flex flex-col gap-1 min-w-[200px]" onClick={(e) => e.stopPropagation()}>
+                                      <div className="flex items-center gap-1.5">
+                                        <input
+                                          id={`input-edit-${cell.id}`}
+                                          type="text"
+                                          value={editValue}
+                                          onChange={(e) => {
+                                            setEditValue(e.target.value);
+                                            if (cellEditError) setCellEditError(null);
+                                          }}
+                                          autoFocus
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') saveCellEdit();
+                                            if (e.key === 'Escape') cancelEditCell();
+                                          }}
+                                          disabled={isSavingCell}
+                                          className={`flex-1 px-2 py-1 text-xs border rounded bg-slate-950 text-slate-100 focus:outline-none ring-1 ${
+                                            cellEditError ? 'border-rose-500 ring-rose-500' : 'border-blue-500 ring-blue-500'
+                                          }`}
+                                        />
+                                        <select
+                                          value={editType}
+                                          onChange={(e: any) => setEditType(e.target.value)}
+                                          disabled={isSavingCell}
+                                          className="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-1 text-slate-200"
+                                        >
+                                          <option value="TEXT">Chữ</option>
+                                          <option value="MONEY">Tiền VND</option>
+                                          <option value="DATE">Ngày</option>
+                                          <option value="NUMBER">Số</option>
+                                        </select>
+                                        <button
+                                          id={`btn-save-${cell.id}`}
+                                          onClick={saveCellEdit}
+                                          disabled={isSavingCell}
+                                          className="p-1 bg-emerald-600 text-white rounded hover:bg-emerald-500 transition disabled:opacity-50"
+                                          title="Lưu (Enter)"
+                                        >
+                                          {isSavingCell ? <LoadingSpinner size="xs" /> : <Check className="w-3.5 h-3.5" />}
+                                        </button>
+                                        <button
+                                          id={`btn-cancel-${cell.id}`}
+                                          onClick={cancelEditCell}
+                                          disabled={isSavingCell}
+                                          className="p-1 bg-slate-800 text-slate-400 rounded hover:text-white transition disabled:opacity-50"
+                                          title="Hủy (Esc)"
+                                        >
+                                          <X className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                      {cellEditError && (
+                                        <div className="text-[10px] text-rose-300 font-medium flex items-center gap-1 bg-rose-950/90 px-1.5 py-0.5 rounded border border-rose-800/80">
+                                          <AlertCircle className="w-3 h-3 text-rose-400 shrink-0" />
+                                          <span>{cellEditError}</span>
+                                        </div>
+                                      )}
                                     </div>
                                   ) : (
                                     <div className="flex items-center justify-between gap-1.5 group/cell">
@@ -1744,70 +2077,94 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
                                         )}
                                       </span>
 
-                                      {/* Quality & Confidence Indicators */}
+                                      {/* Status Badges & Quick Action Controls */}
                                       <div className="flex items-center gap-1 shrink-0 ml-1">
-                                        {isCellReviewed ? (
+                                        {/* State D: HUMAN_RESOLVED Badge */}
+                                        {cellState === 'HUMAN_RESOLVED' && (
                                           <span
-                                            className={`flex items-center text-[10px] px-1.5 py-0.5 rounded border shadow-xs ${
-                                              showCritical
-                                                ? 'bg-rose-950/30 text-rose-300/80 border-rose-800/30'
-                                                : showWarning
-                                                ? 'bg-amber-950/30 text-amber-300/80 border-amber-800/30'
-                                                : 'bg-slate-900 text-slate-400 border-slate-800'
-                                            }`}
-                                            title={cellTooltip}
+                                            className="flex items-center text-[10px] text-cyan-300 font-medium bg-cyan-950/80 px-1.5 py-0.5 rounded border border-cyan-700/60 shadow-xs"
+                                            title={`Người dùng đã xử lý${(cell as any).originalRawValue ? ` (Giá trị gốc: ${(cell as any).originalRawValue})` : ''}`}
                                           >
-                                            <ShieldCheck className="w-3 h-3 text-emerald-400 mr-0.5 shrink-0" />
-                                            Đã kiểm tra
+                                            <ShieldCheck className="w-2.5 h-2.5 mr-0.5 text-cyan-400 shrink-0" />
+                                            Đã đối soát
                                           </span>
-                                        ) : showCritical ? (
+                                        )}
+
+                                        {/* State B: AUTO_RESOLVED Badge */}
+                                        {cellState === 'AUTO_RESOLVED' && (
+                                          <span
+                                            className="flex items-center text-[10px] text-teal-300 font-medium bg-teal-950/70 px-1.5 py-0.5 rounded border border-teal-800/60 shadow-xs"
+                                            title={`Đã tự động giải quyết bằng ${(cell as any).resolutionMethod || 'AI'}${
+                                              (cell as any).originalRawValue ? ` (Giá trị gốc: ${(cell as any).originalRawValue})` : ''
+                                            }`}
+                                          >
+                                            <Sparkles className="w-2.5 h-2.5 mr-0.5 text-teal-400 shrink-0" />
+                                            {(cell as any).resolutionMethod === 'SECONDARY_OCR'
+                                              ? 'OCR lại'
+                                              : (cell as any).resolutionMethod === 'SECONDARY_OCR_ENHANCED'
+                                              ? 'OCR nâng cao'
+                                              : (cell as any).resolutionMethod === 'GEMINI'
+                                              ? 'AI Thẩm định'
+                                              : 'AI xử lý'}
+                                          </span>
+                                        )}
+
+                                        {/* State C: REVIEW_REQUIRED Badge */}
+                                        {cellState === 'REVIEW_REQUIRED' && (
                                           <span
                                             className="flex items-center text-[10px] text-rose-200 font-semibold bg-rose-950/90 px-1.5 py-0.5 rounded border border-rose-700/80 shadow-xs"
                                             title={cellTooltip}
                                           >
                                             <AlertCircle className="w-3 h-3 mr-0.5 text-rose-400 shrink-0" />
-                                            Ưu tiên kiểm tra
+                                            Cần kiểm tra
                                           </span>
-                                        ) : showWarning ? (
+                                        )}
+
+                                        {/* State E: WARNING_ONLY Badge */}
+                                        {cellState === 'WARNING_ONLY' && (
                                           <span
                                             className="flex items-center text-[10px] text-amber-200 font-semibold bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-700/70 shadow-xs"
                                             title={cellTooltip}
                                           >
                                             <AlertTriangle className="w-3 h-3 mr-0.5 text-amber-400 shrink-0" />
-                                            Cần kiểm tra
+                                            Cảnh báo
                                           </span>
-                                        ) : isPass || (!qa && hasConf && cell.confidence >= 0.85) ? (
-                                          <span
-                                            className="w-1.5 h-1.5 rounded-full bg-slate-600/40"
-                                            title={cellTooltip}
-                                          />
-                                        ) : null}
+                                        )}
 
-                                        {/* Action: Confirm As-Is ("Xác nhận đã kiểm tra") for cells needing review */}
-                                        {needsHumanReview && (
+                                        {/* Action: Confirm As-Is for cells needing review or warning */}
+                                        {!cell.isPlaceholder && (cellState === 'REVIEW_REQUIRED' || cellState === 'WARNING_ONLY') && (
                                           <button
+                                            id={`btn-confirm-${cell.id}`}
                                             onClick={(e) => {
                                               e.stopPropagation();
                                               handleConfirmCell(cell);
                                             }}
                                             disabled={isConfirming}
-                                            className="p-0.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/60 rounded transition flex items-center"
-                                            title="Xác nhận đã kiểm tra (Chấp nhận giá trị trích xuất này)"
+                                            className="p-0.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/60 rounded transition flex items-center disabled:opacity-50"
+                                            title="Xác nhận giá trị hiện tại là đúng (Confirm As-Is)"
                                           >
-                                            <CheckCircle2 className="w-3.5 h-3.5" />
+                                            {isConfirming ? (
+                                              <LoadingSpinner size="xs" />
+                                            ) : (
+                                              <CheckCircle2 className="w-3.5 h-3.5" />
+                                            )}
                                           </button>
                                         )}
 
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            startEditCell(cell);
-                                          }}
-                                          className="opacity-0 group-hover/cell:opacity-100 p-0.5 text-slate-400 hover:text-blue-400 transition"
-                                          title="Sửa ô này"
-                                        >
-                                          <Edit2 className="w-3 h-3" />
-                                        </button>
+                                        {/* Action: Start Inline Edit (Never for placeholders) */}
+                                        {!cell.isPlaceholder && (
+                                          <button
+                                            id={`btn-edit-${cell.id}`}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              startEditCell(cell);
+                                            }}
+                                            className="opacity-0 group-hover/cell:opacity-100 p-0.5 text-slate-400 hover:text-blue-400 transition"
+                                            title="Sửa ô này"
+                                          >
+                                            <Edit2 className="w-3 h-3" />
+                                          </button>
+                                        )}
                                       </div>
                                     </div>
                                   )}
@@ -1844,6 +2201,124 @@ export const OcrReviewWorkspace: React.FC<OcrReviewWorkspaceProps> = ({
                       </tbody>
                     </table>
                   </div>
+
+                  {/* ========================================================= */}
+                  {/* SELECTED CELL INSPECTOR PANEL */}
+                  {/* ========================================================= */}
+                  {selectedCell && (
+                    <div className="bg-slate-900/95 border-t border-slate-800 px-4 py-2 flex items-center justify-between gap-4 text-xs text-slate-300 shrink-0">
+                      <div className="flex items-center gap-3 min-w-0 flex-wrap">
+                        <div className="flex items-center gap-1.5 font-semibold text-slate-200">
+                          <Eye className="w-3.5 h-3.5 text-blue-400" />
+                          <span>Chi tiết ô:</span>
+                          <span className="font-mono text-blue-400">
+                            P{selectedCell.sourcePage || 1} · {selectedCell.rawValue || '—'}
+                          </span>
+                        </div>
+
+                        {/* State Pill */}
+                        {(() => {
+                          const state = deriveCellState(selectedCell);
+                          if (state === 'HUMAN_RESOLVED') {
+                            return (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-cyan-950 text-cyan-300 border border-cyan-800 flex items-center gap-1">
+                                <ShieldCheck className="w-3 h-3 text-cyan-400" />
+                                Đã người dùng xử lý (HUMAN)
+                              </span>
+                            );
+                          }
+                          if (state === 'AUTO_RESOLVED') {
+                            return (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-teal-950 text-teal-300 border border-teal-800 flex items-center gap-1">
+                                <Sparkles className="w-3 h-3 text-teal-400" />
+                                Đã AI xử lý ({(selectedCell as any).resolutionMethod || 'AI'})
+                              </span>
+                            );
+                          }
+                          if (state === 'REVIEW_REQUIRED') {
+                            return (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-800 flex items-center gap-1">
+                                <AlertCircle className="w-3 h-3 text-rose-400" />
+                                Cần kiểm tra
+                              </span>
+                            );
+                          }
+                          if (state === 'WARNING_ONLY') {
+                            return (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-950 text-amber-300 border border-amber-800 flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3 text-amber-400" />
+                                Cảnh báo
+                              </span>
+                            );
+                          }
+                          return (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-slate-800 text-slate-300 border border-slate-700">
+                              Hợp lệ (CLEAN)
+                            </span>
+                          );
+                        })()}
+
+                        {/* Provenance: Original vs Current Value */}
+                        {(selectedCell as any).originalRawValue && (selectedCell as any).originalRawValue !== selectedCell.rawValue && (
+                          <div className="flex items-center gap-1 text-[11px] text-slate-400">
+                            <span>Giá trị gốc:</span>
+                            <span className="font-mono text-slate-300 line-through">
+                              {(selectedCell as any).originalRawValue}
+                            </span>
+                            <span>→</span>
+                            <span className="font-mono text-emerald-400 font-semibold">
+                              {selectedCell.rawValue}
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Coordinates & Source Unit */}
+                        {(selectedCell as any).coordinateUnit && (
+                          <div className="text-[11px] text-slate-400 flex items-center gap-1 font-mono">
+                            <span>Đơn vị: {(selectedCell as any).coordinateUnit}</span>
+                            {(selectedCell as any).boundingPolygon && (
+                              <span className="text-slate-500" title={JSON.stringify((selectedCell as any).boundingPolygon)}>
+                                [tọa độ vùng nguồn]
+                              </span>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Validation Issues summary */}
+                        {(selectedCell as any).validationIssues && (selectedCell as any).validationIssues.length > 0 && (
+                          <div className="flex items-center gap-1 text-[11px] text-rose-300 bg-rose-950/60 px-2 py-0.5 rounded border border-rose-900/60">
+                            <AlertCircle className="w-3 h-3 text-rose-400 shrink-0" />
+                            <span>{(selectedCell as any).validationIssues.map((i: any) => i.message).join('; ')}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Quick Action Button for Selected Cell */}
+                      <div className="flex items-center gap-2 shrink-0">
+                        {!selectedCell.isPlaceholder && (
+                          <button
+                            type="button"
+                            onClick={() => startEditCell(selectedCell)}
+                            className="px-2.5 py-1 text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-md font-medium flex items-center gap-1 transition"
+                          >
+                            <Edit2 className="w-3 h-3" />
+                            <span>Chỉnh sửa</span>
+                          </button>
+                        )}
+                        {!selectedCell.isPlaceholder && (deriveCellState(selectedCell) === 'REVIEW_REQUIRED' || deriveCellState(selectedCell) === 'WARNING_ONLY') && (
+                          <button
+                            type="button"
+                            onClick={() => handleConfirmCell(selectedCell)}
+                            disabled={confirmingCellId === selectedCell.id}
+                            className="px-2.5 py-1 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded-md font-medium flex items-center gap-1 transition disabled:opacity-50"
+                          >
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>Xác nhận giá trị này</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                 </div>
               )}

@@ -75,6 +75,9 @@ export interface DocumentItem {
   storage_path: string;
   document_type: string;
   status: 'UPLOADED' | 'WAITING_CONFIRMATION' | 'QUEUED' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'READY' | 'FAILED' | 'DELETED';
+  review_status?: 'UNREVIEWED' | 'IN_PROGRESS' | 'REVIEWED';
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
   preflight_summary?: PreflightSummary | null;
   output_type?: 'EXCEL' | 'WORD' | string;
   created_at: string;
@@ -107,8 +110,17 @@ export interface ExtractedCell {
   rawValue: string;
   normalizedValue: string;
   cellType: 'TEXT' | 'MONEY' | 'DATE' | 'NUMBER';
-  confidence: number;
+  confidence: number | null;
+  confidenceSource?: string;
+  structureConfidence?: number | null;
+  coordinateUnit?: 'point' | 'inch' | 'pixel';
+  validationStatus?: 'ACCEPTED' | 'WARNING' | 'REVIEW_REQUIRED';
+  validationIssues?: Array<{ code: string; severity: string; message: string }>;
+  requiresSecondaryOcr?: boolean;
   isReviewed: boolean;
+  originalRawValue?: string | null;
+  resolutionStatus?: string;
+  resolutionMethod?: string;
   boundingPolygon?: number[];
   updatedAt?: string;
 }
@@ -126,7 +138,10 @@ export interface ExtractedTable {
   tableIndex: number;
   rowCount: number;
   columnCount: number;
-  confidence: number;
+  confidence: number | null;
+  confidenceSource?: string;
+  structureConfidence?: number | null;
+  coordinateUnit?: 'point' | 'inch' | 'pixel';
   boundingRegions?: Array<{ pageNumber: number; polygon: number[] }>;
   headers: string[];
   rows: ExtractedRow[];
@@ -203,6 +218,7 @@ export interface DocumentOCRData {
   metadata?: Record<string, any>;
   documentMetadata?: OCRMetadataItem[];
   unifiedTransactionTable?: UnifiedTransactionTable | null;
+  validationReport?: any;
   stats: OCRStats;
 }
 
@@ -276,11 +292,25 @@ export interface UnifiedCell {
   normalizedValue: string;
   cellType?: string;
   confidence: number | null;
-  confidenceSource?: 'AZURE_WORD_AGGREGATE' | 'AZURE_CELL' | 'EMPTY_CELL' | 'UNAVAILABLE';
+  confidenceSource?: string;
   qualityAssessment?: CellQualityAssessment;
   isReviewed?: boolean;
   boundingPolygon?: any;
   isPlaceholder?: boolean;
+
+  // Phase 6 Validation Engine preservation
+  validationStatus?: 'ACCEPTED' | 'WARNING' | 'REVIEW_REQUIRED';
+  validationIssues?: any[];
+  requiresSecondaryOcr?: boolean;
+  structureConfidence?: number | null;
+
+  // Phase 7 Targeted Secondary OCR & Conflict Resolution preservation
+  originalRawValue?: string | null;
+  resolutionStatus?: 'NOT_REQUIRED' | 'PENDING' | 'RESOLVED' | 'UNRESOLVED' | 'HUMAN_REVIEW_REQUIRED';
+  resolutionMethod?: 'NONE' | 'DETERMINISTIC' | 'SECONDARY_OCR' | 'SECONDARY_OCR_ENHANCED' | 'GEMINI' | 'HUMAN';
+
+  // Coordinate system
+  coordinateUnit?: string;
 }
 
 export interface UnifiedRow {

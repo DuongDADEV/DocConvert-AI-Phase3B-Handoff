@@ -9,6 +9,7 @@ import documentRoutes from './server/routes/documents.js';
 import jobRoutes from './server/routes/jobs.js';
 import planRoutes from './server/routes/plans.js';
 import auditRoutes from './server/routes/audit.js';
+import { ocrWorker } from './server/services/ocrWorker.js';
 
 export async function createApp() {
   const app = express();
@@ -104,8 +105,14 @@ export async function startServer() {
   const app = await createApp();
   const PORT = parseInt(process.env.PORT || '3000', 10);
 
-  serverInstance = app.listen(PORT, '0.0.0.0', () => {
+  serverInstance = app.listen(PORT, '0.0.0.0', async () => {
     console.log(`[DocConvert AI] Server is running on http://0.0.0.0:${PORT} (env: ${process.env.NODE_ENV || 'development'})`);
+    // Explicitly scan and resume pending QUEUED / PROCESSING jobs on server startup
+    try {
+      await ocrWorker.resumeUnfinishedJobs();
+    } catch (resumeErr) {
+      console.warn('[DocConvert AI] Error resuming pending jobs on startup:', resumeErr);
+    }
   });
 
   const gracefulShutdown = (signal: string) => {

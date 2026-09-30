@@ -143,6 +143,8 @@ export class ExcelExportEngine {
       confidence: number;
       isReviewed: boolean;
       status: string;
+      ruleCode?: string;
+      valMsg?: string;
     }> = [];
 
     let totalRowsCount = 0;
@@ -230,17 +232,30 @@ export class ExcelExportEngine {
           if (includeReviewLog && (rowIdx > 0 || !row.isHeader)) {
             const colLetter = this.getColumnLetter(excelColNumber);
             const cellRef = `${colLetter}${excelRowNumber}`;
+            const valStatus = (cell as any).validationStatus || (isLowConf ? 'REVIEW_REQUIRED' : 'ACCEPTED');
+            const valIssues = (cell as any).validationIssues || [];
+            const ruleCode = valIssues[0]?.code || '';
+            const valMsg = valIssues.map((i: any) => i.message).join('; ');
+
+            const originalRaw = (cell as any).originalRawValue || rawVal;
+            const resStatus = (cell as any).resolutionStatus || 'NOT_REQUIRED';
+            const resMethod = (cell as any).resolutionMethod || 'NONE';
+
             reviewLogRows.push({
               sheetName,
               cellRef,
               rowIndex: row.rowIndex,
               colIndex: cell.columnIndex,
+              originalRawValue: originalRaw,
               rawValue: rawVal,
               normalizedValue: normVal,
               cellType: cell.cellType,
               confidence: conf,
               isReviewed,
-              status: isReviewed ? 'ĐÃ ĐỐI SOÁT' : isLowConf ? 'CẦN KIỂM TRA' : 'TIN CẬY',
+              status: isReviewed ? 'ĐÃ ĐỐI SOÁT' : resStatus === 'RESOLVED' ? 'ĐÃ GIẢI QUYẾT TỰ ĐỘNG' : valStatus === 'REVIEW_REQUIRED' ? 'CẦN KIỂM TRA' : valStatus === 'WARNING' ? 'CẢNH BÁO' : 'TIN CẬY',
+              resolutionMethod: resMethod,
+              ruleCode,
+              valMsg,
             });
           }
 
@@ -400,7 +415,19 @@ export class ExcelExportEngine {
       });
 
       // Header Row
-      const headers = ['Sheet', 'Ô (Cell)', 'Giá trị gốc (Raw)', 'Giá trị chuẩn hóa (Normalized)', 'Loại dữ liệu', 'Độ tin cậy', 'Trạng thái đối soát'];
+      const headers = [
+        'Sheet',
+        'Ô (Cell)',
+        'Giá trị ban đầu (Original)',
+        'Giá trị hiện tại (Raw)',
+        'Giá trị chuẩn hóa (Normalized)',
+        'Loại dữ liệu',
+        'Độ tin cậy',
+        'Trạng thái đối soát',
+        'Phương thức giải quyết',
+        'Mã lỗi quy tắc',
+        'Chi tiết kiểm định',
+      ];
       const revHeaderRow = revSheet.addRow(headers);
       revHeaderRow.height = 26;
       revHeaderRow.eachCell((cell) => {
@@ -414,19 +441,26 @@ export class ExcelExportEngine {
         const row = revSheet.addRow([
           item.sheetName,
           item.cellRef,
+          item.originalRawValue || item.rawValue,
           item.rawValue,
           item.normalizedValue,
           item.cellType,
-          `${(item.confidence * 100).toFixed(1)}%`,
+          item.confidence !== null && item.confidence !== undefined ? `${(item.confidence * 100).toFixed(1)}%` : 'Trích xuất trực tiếp',
           item.status,
+          item.resolutionMethod || 'NONE',
+          item.ruleCode || '',
+          item.valMsg || '',
         ]);
         row.height = 20;
 
         // Highlight low confidence in log
-        const statusCell = row.getCell(7);
+        const statusCell = row.getCell(8);
         if (item.status === 'CẦN KIỂM TRA') {
           statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
           statusCell.font = { name: 'Segoe UI', size: 9, bold: true, color: { argb: 'FFB45309' } };
+        } else if (item.status === 'CẢNH BÁO') {
+          statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF6FF' } };
+          statusCell.font = { name: 'Segoe UI', size: 9, bold: true, color: { argb: 'FF1D4ED8' } };
         } else if (item.status === 'ĐÃ ĐỐI SOÁT') {
           statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
           statusCell.font = { name: 'Segoe UI', size: 9, bold: true, color: { argb: 'FF15803D' } };
@@ -434,7 +468,7 @@ export class ExcelExportEngine {
       });
 
       revSheet.columns.forEach((col, idx) => {
-        col.width = [18, 12, 28, 28, 14, 14, 18][idx] || 16;
+        col.width = [18, 12, 24, 24, 14, 16, 18, 22, 35][idx] || 16;
       });
     }
 

@@ -1,0 +1,65 @@
+{
+  "timestamp": "2026-09-30T04:39:52.915Z",
+  "browser": "Microsoft Edge Chromium (Playwright 1.63.0)",
+  "total": 8,
+  "passed": 8,
+  "failed": 0,
+  "tests": [
+    {
+      "id": "BE1",
+      "name": "Open Review Workspace with REVIEW_REQUIRED cell",
+      "status": "PASS",
+      "details": "Workspace opened. Badge: 'Chưa đối soát', Queue: 'Cần kiểm tra:', Cell 1: 1.25O.OOO (Cần kiểm tra)",
+      "durationMs": 2561
+    },
+    {
+      "id": "BE2",
+      "name": "Valid Human Edit: double click, save, verify HUMAN badge and value change",
+      "status": "PASS",
+      "details": "Cell 1 saved as '1.250.000', badge 'Đã đối soát' (HUMAN), Document status: 'Đang đối soát'",
+      "durationMs": 5122
+    },
+    {
+      "id": "BE3",
+      "name": "Invalid Human Edit: 422 error inline, persisted value unchanged",
+      "status": "PASS",
+      "details": "Inline error shown: 'Số tiền chứa ký tự chữ bất thường: \"INVALID_MONEY\"'. Persisted value preserved: '1.250.000' (no invalid overwrite)",
+      "durationMs": 2139
+    },
+    {
+      "id": "BE4",
+      "name": "Confirm As-Is: click confirm, verify HUMAN resolved state",
+      "status": "PASS",
+      "details": "Cell 2 confirmed as-is: '500.000' with badge 'Đã đối soát' (HUMAN)",
+      "durationMs": 4902
+    },
+    {
+      "id": "BE5",
+      "name": "Complete Review with blocker: completion gate blocks and shows blocking modal",
+      "status": "PASS",
+      "details": "Blocking gate triggered successfully. Modal showed 1 unresolved blocking cell. Document status remained 'Đang đối soát'.",
+      "durationMs": 2127
+    },
+    {
+      "id": "BE6",
+      "name": "Complete Review success: resolve blocker, complete review, verify REVIEWED badge",
+      "status": "PASS",
+      "details": "Final blocker resolved ('28/02/2026'). Complete review passed. Header badge: 'Đã đối soát'",
+      "durationMs": 10340
+    },
+    {
+      "id": "BE7",
+      "name": "Browser refresh: reload page and verify persisted decisions remain intact",
+      "status": "PASS",
+      "details": "After browser reload, document is 'Đã đối soát'. Cell 1: 1.250.000, Cell 2: 500.000, Cell 3: 28/02/2026 all verified.",
+      "durationMs": 9136
+    },
+    {
+      "id": "BE8",
+      "name": "Export Excel: trigger export from UI and verify success",
+      "status": "PASS",
+      "details": "Export API triggered and returned HTTP 200: {\"exportId\":\"edef732c-a5e5-49a4-b7a6-71eced9dec62\",\"documentId\":\"11111111-2222-3333-4444-555555555555\",\"userId\":\"6a185b15-eae5-4ac5-81c4-a11af566ef0b\",\"exportFormat\":\"XLSX\",\"exportMode\":\"NORMALIZED\",\"fileName\":\"sao_ke_browser_e2e_export_normalized_1790743191836.xlsx\",\"storageBucket\":\"documents\",\"storagePath\":\"documents/6a185b15-eae5-4ac5-81c4-a11af566ef0b/export_edef732c-a5e5-49a4-b7a6-71eced9dec62/original/sao_ke_browser_e2e_export_normalized_1790743191836.xlsx\",\"fileSize\":9431,\"tablesCount\":1,\"totalRows\":3,\"totalCells\":5,\"lowConfidenceCount\":0,\"reviewedCount\":5,\"createdAt\":\"2026-09-30T04:39:52.398Z\"}",
+      "durationMs": 3146
+    }
+  ]
+}

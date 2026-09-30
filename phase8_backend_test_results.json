@@ -1,0 +1,133 @@
+{
+  "timestamp": "2026-09-30T04:00:05.857Z",
+  "totalTests": 20,
+  "passed": 20,
+  "failed": 0,
+  "aiProviderCalls": {
+    "azurePrimary": 0,
+    "azureSecondary": 0,
+    "gemini": 0
+  },
+  "results": [
+    {
+      "id": "B1",
+      "name": "Valid Human Edit creates HUMAN_EDIT candidate, updates cell, preserves originalRawValue",
+      "status": "PASS",
+      "durationMs": 1791
+    },
+    {
+      "id": "B2",
+      "name": "Invalid Human Edit returns 422, keeps current value unchanged, 0 AI calls",
+      "status": "PASS",
+      "durationMs": 682
+    },
+    {
+      "id": "B3",
+      "name": "Confirm As-Is on Primary preserves value and records resolutionMethod = HUMAN",
+      "status": "PASS",
+      "durationMs": 1868
+    },
+    {
+      "id": "B4",
+      "name": "Confirm As-Is on Secondary keeps Secondary value and does NOT revert to Candidate A",
+      "status": "PASS",
+      "durationMs": 1873
+    },
+    {
+      "id": "B5",
+      "name": "Confirm As-Is fails safely with 409 when candidate mismatches cell value",
+      "status": "PASS",
+      "durationMs": 1212
+    },
+    {
+      "id": "B6",
+      "name": "Physical cell ownership check rejects cross-user or cross-doc edits",
+      "status": "PASS",
+      "durationMs": 123
+    },
+    {
+      "id": "B7",
+      "name": "Placeholder / fake cell ID is rejected with 400 CANNOT_EDIT_PLACEHOLDER_CELL",
+      "status": "PASS",
+      "durationMs": 272
+    },
+    {
+      "id": "B8",
+      "name": "First valid human action transitions review_status to IN_PROGRESS",
+      "status": "PASS",
+      "durationMs": 133
+    },
+    {
+      "id": "B9",
+      "name": "Edit after REVIEWED transitions back to IN_PROGRESS and clears reviewed_by/reviewed_at",
+      "status": "PASS",
+      "durationMs": 1998
+    },
+    {
+      "id": "B10",
+      "name": "Invalid Human Edit does NOT change document review_status",
+      "status": "PASS",
+      "durationMs": 833
+    },
+    {
+      "id": "B11",
+      "name": "Review completion with PENDING cell is blocked",
+      "status": "PASS",
+      "durationMs": 624
+    },
+    {
+      "id": "B12",
+      "name": "Review completion with UNRESOLVED cell is blocked",
+      "status": "PASS",
+      "durationMs": 656
+    },
+    {
+      "id": "B13",
+      "name": "Review completion with HUMAN_REVIEW_REQUIRED cell is blocked",
+      "status": "PASS",
+      "durationMs": 729
+    },
+    {
+      "id": "B14",
+      "name": "Review completion with non-blocking WARNING is allowed",
+      "status": "PASS",
+      "durationMs": 1231
+    },
+    {
+      "id": "B15",
+      "name": "Successful review completion atomically populates REVIEWED, reviewed_by, reviewed_at",
+      "status": "PASS",
+      "durationMs": 133
+    },
+    {
+      "id": "B16",
+      "name": "Re-run OCR resets review_status to UNREVIEWED and clears reviewed_by/reviewed_at",
+      "status": "PASS",
+      "durationMs": 275
+    },
+    {
+      "id": "B17",
+      "name": "Exact duplicate Human Edit request executes safely without corrupting data",
+      "status": "PASS",
+      "durationMs": 3277
+    },
+    {
+      "id": "B18",
+      "name": "Double confirmation on same cell is safe and idempotent",
+      "status": "PASS",
+      "durationMs": 3670
+    },
+    {
+      "id": "B19",
+      "name": "Human review operations trigger 0 Azure Primary, 0 Azure Secondary, and 0 Gemini calls",
+      "status": "PASS",
+      "durationMs": 0
+    },
+    {
+      "id": "B20",
+      "name": "Existing Phase 7 resolution flow remains intact and functional",
+      "status": "PASS",
+      "durationMs": 137
+    }
+  ]
+}

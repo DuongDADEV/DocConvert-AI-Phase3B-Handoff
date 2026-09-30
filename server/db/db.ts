@@ -6,6 +6,14 @@ import { getSupabaseAdminClient, createSupabaseUserClient } from '../services/su
 import { OCRAnalysisResult, OCRMetadataItem } from '../services/ocr/types.js';
 import { MetadataFilterEngine, SEMANTIC_TYPE_ORDER } from '../services/ocr/metadataFilterEngine.js';
 import { PreflightSummary } from '../services/preflightService.js';
+import { ValidationEngine } from '../services/validation/ValidationEngine.js';
+
+export type ProcessingStrategy =
+  | 'LOCAL_NATIVE'
+  | 'AZURE_FULL_PAGE'
+  | 'HYBRID'
+  | 'LOCAL_RECHECK'
+  | 'AZURE_FALLBACK';
 
 export interface DocumentPageRecord {
   id?: string;
@@ -20,6 +28,12 @@ export interface DocumentPageRecord {
   image_coverage: number;
   has_full_page_image: boolean;
   classification_reason?: string | null;
+  processing_strategy?: ProcessingStrategy | null;
+  fallback_strategy?: ProcessingStrategy | null;
+  requires_azure?: boolean;
+  requires_region_analysis?: boolean;
+  decision_reason?: string | null;
+  decision_version?: string | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -112,6 +126,9 @@ export interface DocumentRecord {
   storage_path: string; // documents/{user_id}/{document_id}/original/{file_name}
   document_type: string;
   status: 'UPLOADED' | 'WAITING_CONFIRMATION' | 'QUEUED' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'READY' | 'FAILED' | 'DELETED';
+  review_status?: 'UNREVIEWED' | 'IN_PROGRESS' | 'REVIEWED';
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
   preflight_summary?: PreflightSummary | null;
   output_type?: 'EXCEL' | 'WORD' | string;
   created_at: string;
@@ -556,9 +573,15 @@ class DatabaseService {
   async updateDocumentStatus(userId: string, documentId: string, status: DocumentRecord['status']): Promise<DocumentRecord | null> {
     const client = getSupabaseAdminClient();
     const now = new Date().toISOString();
+    const payload: any = { status, updated_at: now };
+    if (status === 'QUEUED') {
+      payload.review_status = 'UNREVIEWED';
+      payload.reviewed_by = null;
+      payload.reviewed_at = null;
+    }
     const { data } = await client
       .from('documents')
-      .update({ status, updated_at: now })
+      .update(payload)
       .eq('id', documentId)
       .eq('user_id', userId)
       .select()
@@ -605,6 +628,49 @@ class DatabaseService {
     return (data as DocumentRecord) || null;
   }
 
+  /**
+   * Phase 4.2: Atomic PostgreSQL RPC confirmation
+   * Executes document row locking, quota row locking, active job idempotency,
+   * quota deduction, and job creation in a SINGLE PostgreSQL transaction.
+   */
+  async confirmDocumentProcessing(
+    userId: string,
+    documentId: string,
+    outputType: string = 'EXCEL',
+    userToken?: string
+  ): Promise<{
+    success: boolean;
+    already_processing?: boolean;
+    already_completed?: boolean;
+    message?: string;
+    document: DocumentRecord;
+    job: ProcessingJobRecord | null;
+    quota: {
+      used: number;
+      total: number;
+      remaining: number;
+      planId: string;
+      planName: string;
+    };
+  }> {
+    // Privileged transaction RPC is strictly executed using the backend service_role admin client.
+    // The userId has already been cryptographically verified by authMiddleware (from JWT).
+    // The RPC function itself has EXECUTE permissions revoked from PUBLIC, anon, authenticated,
+    // and granted ONLY to service_role, preventing any client-side direct bypass.
+    const client = getSupabaseAdminClient();
+    const { data, error } = await client.rpc('confirm_document_processing', {
+      p_document_id: documentId,
+      p_user_id: userId,
+      p_output_type: outputType,
+    });
+
+    if (error) {
+      throw error;
+    }
+
+    return data;
+  }
+
   // --- DOCUMENT PAGES (PREFLIGHT NORMALIZED TABLE) ---
   async createDocumentPages(pages: DocumentPageRecord[], userToken?: string): Promise<DocumentPageRecord[]> {
     if (!pages || pages.length === 0) return [];
@@ -643,6 +709,47 @@ class DatabaseService {
     }
 
     return (data || []) as DocumentPageRecord[];
+  }
+
+  async updateDocumentPageDecisions(
+    documentId: string,
+    decisions: Array<{
+      page_number: number;
+      processing_strategy: ProcessingStrategy;
+      fallback_strategy?: ProcessingStrategy;
+      requires_azure: boolean;
+      requires_region_analysis: boolean;
+      decision_reason: string;
+      decision_version: string;
+    }>,
+    userToken?: string
+  ): Promise<void> {
+    if (!decisions || decisions.length === 0) return;
+    const client = this.getClient(userToken);
+    const now = new Date().toISOString();
+
+    for (const d of decisions) {
+      const updatePayload: any = {
+        processing_strategy: d.processing_strategy,
+        fallback_strategy: d.fallback_strategy || null,
+        requires_azure: d.requires_azure,
+        requires_region_analysis: d.requires_region_analysis,
+        decision_reason: d.decision_reason,
+        decision_version: d.decision_version,
+        updated_at: now,
+      };
+
+      const { error } = await client
+        .from('document_pages')
+        .update(updatePayload)
+        .eq('document_id', documentId)
+        .eq('page_number', d.page_number);
+
+      if (error) {
+        console.error(`[updateDocumentPageDecisions] Error updating page ${d.page_number}:`, error.message);
+        throw new Error(`Lỗi cập nhật quyết định xử lý trang ${d.page_number}: ${error.message}`);
+      }
+    }
   }
 
   async updateDocumentPageCount(userId: string, documentId: string, pageCount: number): Promise<DocumentRecord | null> {
@@ -744,7 +851,7 @@ class DatabaseService {
     const { data } = await client
       .from('processing_jobs')
       .select('*')
-      .in('status', ['QUEUED', 'PROCESSING'])
+      .in('status', ['QUEUED', 'PROCESSING', 'VALIDATING', 'UPLOADING', 'PARSING', 'VALIDATING_RESULT'])
       .order('created_at', { ascending: true });
 
     return data || [];
@@ -764,8 +871,13 @@ class DatabaseService {
     return data || null;
   }
 
-  // --- OCR RESULTS & COMPENSATING ROLLBACK ---
-  async saveOcrAnalysis(userId: string, documentId: string, analysis: OCRAnalysisResult): Promise<void> {
+  // --- ATOMIC OCR RESULTS & VALIDATION PERSISTENCE (PHASE 6) ---
+  async saveOcrAnalysis(
+    userId: string,
+    documentId: string,
+    analysis: OCRAnalysisResult,
+    validationReport?: any
+  ): Promise<void> {
     const client = getSupabaseAdminClient();
     const doc = await this.getUserDocumentById(userId, documentId);
     if (!doc) {
@@ -773,185 +885,159 @@ class DatabaseService {
     }
 
     const now = new Date().toISOString();
+    const finalStatus = validationReport?.status || 'READY';
 
-    // Snapshot existing metadata for document before any cleanup (Requirement 19: Idempotent replacement safety)
-    let snapshotOldMetadata: any[] | null = null;
-    try {
-      const { data } = await client.from('document_metadata').select('*').eq('document_id', documentId);
-      snapshotOldMetadata = data;
-    } catch {
-      // Table may be empty
-    }
+    // 1. Prepare normalized ocr_results records
+    const ocrResultRecords = (analysis.pages || []).map((p, idx) => ({
+      id: crypto.randomUUID(),
+      page_number: p.pageNumber,
+      raw_text: p.rawText || analysis.rawText,
+      confidence_score: p.confidence ?? analysis.overallConfidence,
+      azure_model_id: analysis.modelId,
+      metadata: {
+        provider: analysis.provider,
+        linesCount: p.linesCount,
+        ...(idx === 0 && analysis.documentMetadata ? { documentMetadata: analysis.documentMetadata } : {}),
+        ...analysis.metadata,
+      },
+    }));
 
-    // Guardrail 2: Compensating Cleanup of old OCR records for this document
-    await this.cleanupOcrData(documentId);
+    // 2. Prepare normalized tables, rows, cells & validation issues
+    const tableRecords: any[] = [];
+    const rowRecords: any[] = [];
+    const cellRecords: any[] = [];
+    const validationIssuesRecords: any[] = [];
 
-    try {
-      // 1. Update doc page count
-      if (Array.isArray(analysis.pages) && analysis.pages.length > 0) {
-        await client
-          .from('documents')
-          .update({ page_count: analysis.pages.length, updated_at: now })
-          .eq('id', documentId)
-          .eq('user_id', userId);
-      }
+    for (const t of analysis.tables || []) {
+      const tableId = (t as any).id || crypto.randomUUID();
+      (t as any).id = tableId;
+      const tableSource = (t as any).confidenceSource || (t.confidence != null ? 'AZURE_MODEL' : 'LOCAL_HEURISTIC');
+      const structConf = (t as any).structureConfidence;
 
-      // 2. Save ocr_results
-      const ocrResultRecords: OcrResultRecord[] = analysis.pages.map((p, idx) => ({
-        id: crypto.randomUUID(),
-        document_id: documentId,
-        page_number: p.pageNumber,
-        raw_text: p.rawText || analysis.rawText,
-        confidence_score: p.confidence ?? analysis.overallConfidence,
-        azure_model_id: analysis.modelId,
-        metadata: {
-          provider: analysis.provider,
-          linesCount: p.linesCount,
-          ...(idx === 0 && analysis.documentMetadata ? { documentMetadata: analysis.documentMetadata } : {}),
-          ...analysis.metadata,
-        },
-        created_at: now,
-      }));
+      tableRecords.push({
+        id: tableId,
+        page_number: t.pageNumber,
+        table_index: t.tableIndex,
+        row_count: t.rowCount,
+        column_count: t.columnCount,
+        confidence_score: t.confidence,
+        confidence_source: tableSource,
+        structure_confidence: structConf,
+      });
 
-      if (ocrResultRecords.length > 0) {
-        const { error: ocrErr } = await client.from('ocr_results').insert(ocrResultRecords);
-        if (ocrErr) throw ocrErr;
-      }
+      for (const r of t.rows || []) {
+        const rowId = (r as any).id || crypto.randomUUID();
+        (r as any).id = rowId;
 
-      // 3. Save extracted_tables, extracted_rows, extracted_cells
-      const tableRecords: ExtractedTableRecord[] = [];
-      const rowRecords: ExtractedRowRecord[] = [];
-      const cellRecords: ExtractedCellRecord[] = [];
-
-      for (const t of analysis.tables) {
-        const tableId = crypto.randomUUID();
-        tableRecords.push({
-          id: tableId,
-          document_id: documentId,
-          page_number: t.pageNumber,
-          table_index: t.tableIndex,
-          row_count: t.rowCount,
-          column_count: t.columnCount,
-          confidence_score: t.confidence,
-          created_at: now,
+        rowRecords.push({
+          id: rowId,
+          table_id: tableId,
+          row_index: r.rowIndex,
+          is_header: r.isHeader,
         });
 
-        for (const r of t.rows) {
-          const rowId = crypto.randomUUID();
-          rowRecords.push({
-            id: rowId,
-            table_id: tableId,
-            row_index: r.rowIndex,
-            created_at: now,
+        for (const c of r.cells || []) {
+          const cellId = (c as any).id || crypto.randomUUID();
+          (c as any).id = cellId;
+          const cellSource = (c as any).confidenceSource || tableSource;
+
+          cellRecords.push({
+            id: cellId,
+            row_id: rowId,
+            column_index: c.columnIndex,
+            raw_value: c.rawValue,
+            normalized_value: c.normalizedValue || c.rawValue,
+            cell_type: c.cellType || 'TEXT',
+            confidence_score: c.confidence,
+            confidence_source: cellSource,
+            is_reviewed: false,
+            bounding_box: c.boundingPolygon
+              ? {
+                  polygon: c.boundingPolygon,
+                  unit: (c as any).coordinateUnit || 'point',
+                }
+              : undefined,
+            validation_status: (c as any).validationStatus || 'ACCEPTED',
+            validation_issues: (c as any).validationIssues || [],
+            requires_secondary_ocr: (c as any).requiresSecondaryOcr || false,
           });
 
-          for (const c of r.cells) {
-            cellRecords.push({
-              id: crypto.randomUUID(),
-              row_id: rowId,
-              column_index: c.columnIndex,
-              raw_value: c.rawValue,
-              normalized_value: c.normalizedValue || c.rawValue,
-              cell_type: c.cellType || 'TEXT',
-              confidence_score: c.confidence,
-              is_reviewed: false,
-              bounding_box: c.boundingPolygon ? { polygon: c.boundingPolygon } : undefined,
-              created_at: now,
-              updated_at: now,
-            });
+          if (Array.isArray((c as any).validationIssues)) {
+            for (const iss of (c as any).validationIssues) {
+              validationIssuesRecords.push({
+                table_id: tableId,
+                cell_id: cellId,
+                page_number: t.pageNumber,
+                row_index: r.rowIndex,
+                column_index: c.columnIndex,
+                rule_code: iss.code,
+                severity: iss.severity,
+                message: iss.message,
+                observed_value: iss.observedValue !== undefined ? String(iss.observedValue) : null,
+                expected_pattern: iss.expected,
+                requires_secondary_ocr: iss.requiresSecondaryOcr || false,
+                bounding_box: c.boundingPolygon ? { polygon: c.boundingPolygon } : undefined,
+                coordinate_unit: (c as any).coordinateUnit || 'point',
+              });
+            }
           }
         }
       }
-
-      if (tableRecords.length > 0) {
-        const { error: tErr } = await client.from('extracted_tables').insert(tableRecords);
-        if (tErr) throw tErr;
-      }
-
-      if (rowRecords.length > 0) {
-        const { error: rErr } = await client.from('extracted_rows').insert(rowRecords);
-        if (rErr) throw rErr;
-      }
-
-      // Guardrail 3: Safe Chunked Batch Insert for extracted_cells (batch size 200)
-      if (cellRecords.length > 0) {
-        const batchSize = 200;
-        for (let i = 0; i < cellRecords.length; i += batchSize) {
-          const chunk = cellRecords.slice(i, i + batchSize);
-          const { error: cErr } = await client.from('extracted_cells').insert(chunk);
-          if (cErr) throw cErr;
-        }
-      }
-
-      // 4. Save canonical document_metadata (Requirement 19: Safe In-Memory Preparation & Controlled Replace)
-      if (Array.isArray(analysis.documentMetadata) && analysis.documentMetadata.length > 0) {
-        const metadataRecords: any[] = analysis.documentMetadata.map((m) => {
-          const rec: any = {
-            id: crypto.randomUUID(),
-            document_id: documentId,
-            label: m.label,
-            raw_label: m.rawLabel,
-            value: m.value,
-            raw_value: m.rawValue,
-            normalized_label: MetadataFilterEngine.normalizeLabel(m.rawLabel),
-            normalized_value_for_match: MetadataFilterEngine.normalizeValueForMatch(m.rawValue),
-            confidence_score: m.confidence,
-            source_page: m.sourcePage,
-            key_bounding_box: m.keyBoundingPolygon ? { polygon: m.keyBoundingPolygon } : undefined,
-            value_bounding_box: m.valueBoundingPolygon ? { polygon: m.valueBoundingPolygon } : undefined,
-            occurrence_count: m.occurrenceCount || 1,
-            status: m.status || 'AUTO',
-            alternatives: m.alternatives || [],
-            created_at: now,
-            updated_at: now,
-          };
-          if (m.semanticType) rec.semantic_type = m.semanticType;
-          if (m.qualityScore != null) rec.quality_score = m.qualityScore;
-          if (m.visibilityClass) rec.visibility_class = m.visibilityClass;
-          return rec;
-        });
-
-        // Insert new records; if DB columns don't exist yet, embed into alternatives gracefully
-        let { error: metaErr } = await client.from('document_metadata').insert(metadataRecords);
-        if (metaErr && metaErr.message?.includes('column') && metaErr.message?.includes('does not exist')) {
-          const fallbackRecords = metadataRecords.map((r) => {
-            const { semantic_type, quality_score, visibility_class, ...rest } = r;
-            const alts = Array.isArray(rest.alternatives) ? [...rest.alternatives] : [];
-            alts.push({
-              _metaExt: {
-                semanticType: semantic_type,
-                qualityScore: quality_score,
-                visibilityClass: visibility_class,
-              },
-            });
-            return { ...rest, alternatives: alts };
-          });
-          const resFallback = await client.from('document_metadata').insert(fallbackRecords);
-          metaErr = resFallback.error;
-        }
-
-        if (metaErr) {
-          console.warn(`[saveOcrAnalysis] Notice: document_metadata insert: ${metaErr.message}`);
-        }
-      }
-    } catch (err) {
-      console.error(`[saveOcrAnalysis] Failed to insert OCR records for document ${documentId}. Executing compensating rollback cleanup...`, err);
-      await this.cleanupOcrData(documentId);
-      if (snapshotOldMetadata && snapshotOldMetadata.length > 0) {
-        try {
-          await client.from('document_metadata').insert(snapshotOldMetadata);
-          console.log(`[saveOcrAnalysis] Successfully restored ${snapshotOldMetadata.length} snapshot metadata records.`);
-        } catch (restoreErr) {
-          console.error('[saveOcrAnalysis] Failed to restore metadata snapshot:', restoreErr);
-        }
-      }
-      await client
-        .from('documents')
-        .update({ status: 'FAILED', updated_at: now })
-        .eq('id', documentId)
-        .eq('user_id', userId);
-      throw err;
     }
+
+    // 3. Assemble atomic JSON payload
+    const effectiveValReport = validationReport !== undefined ? validationReport : ValidationEngine.validate(documentId, analysis);
+
+    const metadataRecords = (analysis.documentMetadata || []).map((m: any) => ({
+      id: m.id || crypto.randomUUID(),
+      label: m.label,
+      raw_label: m.rawLabel ?? m.raw_label ?? m.label ?? '',
+      value: m.value,
+      raw_value: m.rawValue ?? m.raw_value ?? m.value ?? '',
+      normalized_label: m.normalizedLabel ?? m.normalized_label ?? (m.label ? String(m.label).toLowerCase().trim() : 'unknown'),
+      normalized_value_for_match: m.normalizedValueForMatch ?? m.normalized_value_for_match ?? (m.value ? String(m.value).toLowerCase().trim() : ''),
+      confidence_score: m.confidence ?? m.confidence_score ?? 0.95,
+      source_page: m.sourcePage ?? m.source_page ?? 1,
+      key_bounding_box: m.keyBoundingPolygon ? { polygon: m.keyBoundingPolygon } : m.key_bounding_box,
+      value_bounding_box: m.valueBoundingPolygon ? { polygon: m.valueBoundingPolygon } : m.value_bounding_box,
+      occurrence_count: m.occurrenceCount ?? m.occurrence_count ?? 1,
+      status: m.status || 'AUTO',
+      alternatives: m.alternatives || [],
+    }));
+
+    const payload = {
+      page_count: analysis.pages?.length || 1,
+      final_status: finalStatus,
+      ocr_results: ocrResultRecords,
+      tables: tableRecords,
+      rows: rowRecords,
+      cells: cellRecords,
+      document_metadata: metadataRecords,
+      validation_run: effectiveValReport
+        ? {
+            status: effectiveValReport.status,
+            accepted_count: effectiveValReport.acceptedCount,
+            warning_count: effectiveValReport.warningCount,
+            review_required_count: effectiveValReport.reviewRequiredCount,
+            validation_version: effectiveValReport.validationVersion,
+          }
+        : null,
+      validation_issues: validationIssuesRecords,
+    };
+
+    // 4. Execute Native PostgreSQL Atomic Transaction via RPC
+    const { data: rpcRes, error: rpcErr } = await client.rpc('save_document_analysis_atomic', {
+      p_document_id: documentId,
+      p_user_id: userId,
+      p_payload: payload,
+    });
+
+    if (rpcErr) {
+      console.error(`[saveOcrAnalysis] save_document_analysis_atomic RPC failed:`, rpcErr);
+      throw new Error(`ATOMIC_PERSISTENCE_FAILED: ${rpcErr.message}`);
+    }
+
+    console.log(`[saveOcrAnalysis] Successfully persisted analysis atomically via PostgreSQL RPC for doc ${documentId}`);
   }
 
   private async cleanupOcrData(documentId: string): Promise<void> {
@@ -981,15 +1067,19 @@ class DatabaseService {
     const doc = await this.getUserDocumentById(userId, documentId, userToken);
     if (!doc) return null;
 
-    const [pagesRes, tablesRes, metadataRes] = await Promise.all([
+    const [pagesRes, tablesRes, metadataRes, valRunRes, valIssuesRes] = await Promise.all([
       client.from('ocr_results').select('*').eq('document_id', documentId).order('page_number', { ascending: true }),
       client.from('extracted_tables').select('*').eq('document_id', documentId).order('table_index', { ascending: true }),
       client.from('document_metadata').select('*').eq('document_id', documentId).order('source_page', { ascending: true }),
+      client.from('validation_runs').select('*').eq('document_id', documentId).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+      client.from('validation_issues').select('*').eq('document_id', documentId).order('page_number', { ascending: true }),
     ]);
 
     const pages = pagesRes.data || [];
     const dbTables = tablesRes.data || [];
     const dbMetadata = metadataRes.data || [];
+    const valRun = (valRunRes as any)?.data || null;
+    const valIssues = (valIssuesRes as any)?.data || [];
 
     let formattedTables: any[] = [];
     let dbCellsAll: any[] = [];
@@ -1040,11 +1130,21 @@ class DatabaseService {
                 normalizedValue: c.normalized_value,
                 cellType: c.cell_type,
                 confidence: c.confidence_score !== null && c.confidence_score !== undefined ? Number(c.confidence_score) : null,
-                confidenceSource: c.confidence_score !== null && c.confidence_score !== undefined
-                  ? 'AZURE_WORD_AGGREGATE'
-                  : (c.raw_value && c.raw_value.trim() !== '' ? 'UNAVAILABLE' : 'EMPTY_CELL'),
+                confidenceSource: c.confidence_source || (c.confidence_score !== null && c.confidence_score !== undefined
+                  ? 'AZURE_MODEL'
+                  : (c.raw_value && c.raw_value.trim() !== '' ? 'LOCAL_HEURISTIC' : 'EMPTY_CELL')),
+                structureConfidence: (c as any).structure_confidence != null
+                  ? Number((c as any).structure_confidence)
+                  : (t.structure_confidence != null ? Number(t.structure_confidence) : null),
+                validationStatus: c.validation_status || 'ACCEPTED',
+                validationIssues: c.validation_issues || [],
+                requiresSecondaryOcr: c.requires_secondary_ocr || false,
                 isReviewed: c.is_reviewed,
+                originalRawValue: c.original_raw_value,
+                resolutionStatus: c.resolution_status,
+                resolutionMethod: c.resolution_method,
                 boundingPolygon: c.bounding_box?.polygon,
+                coordinateUnit: c.bounding_box?.unit || 'point',
                 updatedAt: c.updated_at,
               })),
             };
@@ -1060,6 +1160,8 @@ class DatabaseService {
             rowCount: t.row_count,
             columnCount: t.column_count,
             confidence: t.confidence_score,
+            confidenceSource: t.confidence_source || (t.confidence_score != null ? 'AZURE_MODEL' : 'LOCAL_HEURISTIC'),
+            structureConfidence: t.structure_confidence != null ? Number(t.structure_confidence) : null,
             boundingRegions: t.bounding_regions,
             headers,
             rows: formattedRows,
@@ -1075,7 +1177,11 @@ class DatabaseService {
 
     for (const c of dbCellsAll) {
       totalCells++;
-      const score = c.confidence_score ?? 1.0;
+      if (c.confidence_score === null || c.confidence_score === undefined) {
+        // Native local digital extraction cells: do not falsely treat as low OCR confidence
+        continue;
+      }
+      const score = Number(c.confidence_score);
       if (score < 0.7) lowConfidenceCount++;
       else if (score < 0.9) mediumConfidenceCount++;
       else highConfidenceCount++;
@@ -1124,6 +1230,18 @@ class DatabaseService {
 
     documentMetadata = MetadataFilterEngine.canonicalizeMetadata(documentMetadata);
 
+    const validationReport = valRun
+      ? {
+          id: valRun.id,
+          status: valRun.status,
+          acceptedCount: valRun.accepted_count,
+          warningCount: valRun.warning_count,
+          reviewRequiredCount: valRun.review_required_count,
+          validationVersion: valRun.validation_version,
+          issues: valIssues,
+        }
+      : null;
+
     return {
       document: doc,
       pages: pages.map((p) => ({
@@ -1135,12 +1253,15 @@ class DatabaseService {
       })),
       tables: formattedTables,
       documentMetadata,
+      validationReport,
       stats: {
         totalCells,
         lowConfidenceCount,
         mediumConfidenceCount,
         highConfidenceCount,
-        requiresReview: lowConfidenceCount > 0 || formattedTables.length > 0,
+        requiresReview: validationReport
+          ? validationReport.status === 'REVIEW_REQUIRED'
+          : lowConfidenceCount > 0,
       },
     };
   }
@@ -1294,7 +1415,18 @@ class DatabaseService {
     if (!doc) throw new Error('Document not found');
 
     const now = new Date().toISOString();
-    const { data } = await client.from('documents').update({ status: 'READY', updated_at: now }).eq('id', documentId).eq('user_id', userId).select().single();
+    const { data } = await client
+      .from('documents')
+      .update({
+        review_status: 'REVIEWED',
+        reviewed_by: userId,
+        reviewed_at: now,
+        updated_at: now,
+      })
+      .eq('id', documentId)
+      .eq('user_id', userId)
+      .select()
+      .single();
 
     await client.from('review_actions').insert({
       id: crypto.randomUUID(),

@@ -3,6 +3,7 @@ import { ocrWorker } from './ocrWorker.js';
 
 export interface IOCRService {
   queueDocumentForProcessing(userId: string, documentId: string): Promise<ProcessingJobRecord>;
+  startExistingJob(userId: string, jobId: string, documentId: string): void;
   retryDocumentProcessing(userId: string, documentId: string): Promise<ProcessingJobRecord>;
   getJobStatus(userId: string, jobId: string): Promise<ProcessingJobRecord | null>;
 }
@@ -57,6 +58,18 @@ export class AzureDocumentIntelligenceService implements IOCRService {
     });
 
     return job;
+  }
+
+  /**
+   * Triggers background OCR worker for a job that was ALREADY durably created by the atomic database transaction.
+   * Does NOT insert another job, does NOT touch quota, and does NOT overwrite document status.
+   */
+  startExistingJob(userId: string, jobId: string, documentId: string): void {
+    setImmediate(() => {
+      ocrWorker.processJob(userId, jobId, documentId).catch((err) => {
+        console.error(`[ocrService] Background worker error for existing job ${jobId}:`, err);
+      });
+    });
   }
 
   async retryDocumentProcessing(userId: string, documentId: string): Promise<ProcessingJobRecord> {

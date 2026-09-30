@@ -1,0 +1,122 @@
+{
+  "suite": "Phase 8 Frontend & Workspace E2E Matrix",
+  "timestamp": "2026-09-30T03:59:32.971Z",
+  "totalTests": 18,
+  "passed": 18,
+  "failed": 0,
+  "tests": [
+    {
+      "id": "E1",
+      "name": "CLEAN DOCUMENT: no unresolved cells, clean review queue",
+      "status": "PASS",
+      "durationMs": 584
+    },
+    {
+      "id": "E2",
+      "name": "REVIEW_REQUIRED CELL: cell highlighted, in queue, count correct",
+      "status": "PASS",
+      "durationMs": 593
+    },
+    {
+      "id": "E3",
+      "name": "SELECT ISSUE: coordinates, unit, and source page accessible",
+      "status": "PASS",
+      "durationMs": 528
+    },
+    {
+      "id": "E4",
+      "name": "VALID HUMAN EDIT: persists HUMAN resolution, updates review_status = IN_PROGRESS",
+      "status": "PASS",
+      "durationMs": 2201
+    },
+    {
+      "id": "E5",
+      "name": "INVALID HUMAN EDIT: rejects 422, keeps persisted value unchanged",
+      "status": "PASS",
+      "durationMs": 679
+    },
+    {
+      "id": "E6",
+      "name": "CONFIRM AS-IS PRIMARY: confirms Primary OCR candidate, marks HUMAN resolved",
+      "status": "PASS",
+      "durationMs": 2102
+    },
+    {
+      "id": "E7",
+      "name": "CONFIRM AS-IS SECONDARY: confirms current Secondary candidate without rollback",
+      "status": "PASS",
+      "durationMs": 2033
+    },
+    {
+      "id": "E8",
+      "name": "CANDIDATE MISMATCH: rejects 409 when cell has candidate mismatch",
+      "status": "PASS",
+      "durationMs": 1250
+    },
+    {
+      "id": "E9",
+      "name": "PLACEHOLDER: cannot edit or confirm placeholder, not in queue",
+      "status": "PASS",
+      "durationMs": 304
+    },
+    {
+      "id": "E10",
+      "name": "COMPLETE REVIEW WITH BLOCKER: blocks 400 when blocking cells remain",
+      "status": "PASS",
+      "durationMs": 680
+    },
+    {
+      "id": "E11",
+      "name": "COMPLETE REVIEW SUCCESS: marks document REVIEWED when all blockers resolved",
+      "status": "PASS",
+      "durationMs": 2764
+    },
+    {
+      "id": "E12",
+      "name": "EDIT AFTER REVIEWED: transitions review_status back to IN_PROGRESS",
+      "status": "PASS",
+      "durationMs": 2004
+    },
+    {
+      "id": "E13",
+      "name": "REFRESH BROWSER PERSISTENCE: refetching OCR data returns authoritative state",
+      "status": "PASS",
+      "durationMs": 684
+    },
+    {
+      "id": "E14",
+      "name": "CLOSE AND REOPEN WORKSPACE: workspace reopened with consistent state",
+      "status": "PASS",
+      "durationMs": 549
+    },
+    {
+      "id": "E15",
+      "name": "EXPORT AFTER HUMAN EDIT: exported Excel contains latest human edit value",
+      "status": "PASS",
+      "durationMs": 3015
+    },
+    {
+      "id": "E16",
+      "name": "DOUBLE CLICK SAVE: concurrent save calls remain consistent",
+      "status": "PASS",
+      "durationMs": 1757
+    },
+    {
+      "id": "E17",
+      "name": "DOUBLE CLICK CONFIRM: concurrent confirm calls remain idempotent",
+      "status": "PASS",
+      "durationMs": 1856
+    },
+    {
+      "id": "E18",
+      "name": "HUMAN REVIEW AI PROVIDER COUNT: Azure Primary = 0, Secondary = 0, Gemini = 0",
+      "status": "PASS",
+      "durationMs": 0
+    }
+  ],
+  "aiProviderCalls": {
+    "azurePrimary": 0,
+    "azureSecondary": 0,
+    "gemini": 0
+  }
+}
