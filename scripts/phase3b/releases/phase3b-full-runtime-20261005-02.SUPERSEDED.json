@@ -1,0 +1,11 @@
+{
+  "releaseId": "phase3b-full-runtime-20261005-02",
+  "status": "SUPERSEDED_NEVER_DEPLOYED",
+  "supersededBy": "phase3b-full-runtime-20261005-03",
+  "supersededAt": "2026-10-05",
+  "reason": "non-canonical package-lock.json regenerated inside AI Studio sandbox",
+  "canonicalPackageLockSha256": "e29b913f4df1a8cba147290308f9f60d421b09ae2548f973673b45810e2891bc",
+  "nonCanonicalPackageLockSha256": "0319ed8641216fc7b3e30f37d1344ef888f3625c7452451ada99ead585b5b9ab",
+  "runtimeChanged": false,
+  "productionDeployed": false
+}

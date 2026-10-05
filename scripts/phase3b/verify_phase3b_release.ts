@@ -39,8 +39,8 @@ export async function verifyRelease() {
   assert(fs.existsSync(RELEASE_MANIFEST_PATH), 'Release manifest exists');
   const releaseManifest = JSON.parse(fs.readFileSync(RELEASE_MANIFEST_PATH, 'utf-8'));
   assert(
-    releaseManifest.releaseId === 'phase3b-full-runtime-20261005-02',
-    `Release ID is phase3b-full-runtime-20261005-02 (got: ${releaseManifest.releaseId})`
+    releaseManifest.releaseId === 'phase3b-full-runtime-20261005-03',
+    `Release ID is phase3b-full-runtime-20261005-03 (got: ${releaseManifest.releaseId})`
   );
 
   // 2. Source manifest

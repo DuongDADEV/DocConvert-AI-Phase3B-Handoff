@@ -1,30 +1,22 @@
 {
   "releaseId": "phase3b-full-runtime-20261005-03",
-  "artifactName": "Full Phase 3B Production Runtime Release Artifact",
+  "status": "SEALED_NOT_DEPLOYED",
+  "supersedes": "phase3b-full-runtime-20261005-02",
   "createdAt": "2026-10-05T06:40:00.000Z",
-  "sourceRevision": {
-    "gitHeadSha": "UNKNOWN",
-    "workingTreeDirty": true,
-    "sourceManifestSha256": "d705890591c40d2dd5dafd322a58d16047cdaefb0c7a0395adf4251ae1dd846f",
-    "sourceFileCount": 337,
-    "baselineDescription": "Full Phase 3B Production Runtime with atomic credit reservation, worker hard gate, and credit ledger hotfix"
+  "sourceSnapshotOrigin": "canonical package-lock.json from original Windows repository, reproducible clean handoff snapshot",
+  "historicalStatus": {
+    "release01": "phase3b-full-runtime-20261005-01 superseded and never deployed",
+    "release02": "phase3b-full-runtime-20261005-02 superseded and never deployed",
+    "release03": "phase3b-full-runtime-20261005-03 is current sealed candidate"
   },
-  "artifactPaths": {
-    "artifactDir": ".phase3b_production_artifact",
-    "serverBundle": ".phase3b_production_artifact/dist/server.cjs",
-    "materializerScript": "scripts/phase3b/materialize_phase3b_production.ts",
-    "sourceManifest": "scripts/phase3b/phase3b_production_source_manifest.txt",
-    "distManifest": "scripts/phase3b/phase3b_production_dist_manifest.txt",
-    "predeployCheckSql": "scripts/phase3b/phase3b_predeploy_read_only_checks.sql"
-  },
-  "sha256": {
-    "serverBundle": "d927a1f027cbaf912a791c9413d2b273bf17096f3e2adda9bb7f2fb67bbecf97",
-    "materializerScript": "ac65daff327b6a01ec46772c1bc36b2753b86afbab97b93e7e1d720ed311d1b0",
-    "packageJson": "fd5694751920fc97edb0d802fa257068fee9df6a4b34705ca79fa312571e8836",
-    "packageLockJson": "e29b913f4df1a8cba147290308f9f60d421b09ae2548f973673b45810e2891bc",
-    "sourceManifest": "d705890591c40d2dd5dafd322a58d16047cdaefb0c7a0395adf4251ae1dd846f",
-    "distManifest": "c3bdf918770c22a1372b8c0b7905e5407cdc47107eeacf5213a12c5e4ca03258"
-  },
+  "canonicalPackageLockSha256": "e29b913f4df1a8cba147290308f9f60d421b09ae2548f973673b45810e2891bc",
+  "serverBundleSha256": "d927a1f027cbaf912a791c9413d2b273bf17096f3e2adda9bb7f2fb67bbecf97",
+  "sourceManifestSha256": "d705890591c40d2dd5dafd322a58d16047cdaefb0c7a0395adf4251ae1dd846f",
+  "distManifestSha256": "c3bdf918770c22a1372b8c0b7905e5407cdc47107eeacf5213a12c5e4ca03258",
+  "materializerSha256": "ac65daff327b6a01ec46772c1bc36b2753b86afbab97b93e7e1d720ed311d1b0",
+  "packageJsonSha256": "fd5694751920fc97edb0d802fa257068fee9df6a4b34705ca79fa312571e8836",
+  "packageLockSha256": "e29b913f4df1a8cba147290308f9f60d421b09ae2548f973673b45810e2891bc",
+  "sourceFileCount": 337,
   "databaseBaselineRequirements": {
     "phase2a": {
       "migration": "20261001000000_credit_ledger_foundation.sql",
@@ -81,13 +73,6 @@
     "freeBootstrapCompatible": true,
     "maintenanceGuardsPreserved": true
   },
-  "deploymentInstructions": {
-    "command": "railway up . --path-as-root --no-gitignore --service DocConvert-AI --environment production --message \"phase3b-full-runtime-20261005-03\"",
-    "cwd": ".phase3b_production_artifact",
-    "targetWorkspace": "DuongAIOS's Projects",
-    "targetProject": "zealous-friendship",
-    "targetEnvironment": "production",
-    "targetService": "DocConvert-AI",
-    "maintenancePolicy": "KEEP_MAINTENANCE_TRUE_DURING_DEPLOY_AND_SMOKE"
-  }
+  "deploymentCommand": "railway up . --path-as-root --no-gitignore --service DocConvert-AI --environment production --message \"phase3b-full-runtime-20261005-03\"",
+  "maintenancePolicy": "KEEP_MAINTENANCE_TRUE_DURING_DEPLOY_AND_SMOKE"
 }

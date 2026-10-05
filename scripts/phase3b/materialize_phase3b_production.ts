@@ -18,7 +18,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '../..');
 const TARGET_DIR = path.resolve(ROOT_DIR, '.phase3b_production_artifact');
-const RELEASE_ID = 'phase3b-full-runtime-20261005-02';
+const RELEASE_ID = 'phase3b-full-runtime-20261005-03';
 
 console.log('================================================================');
 console.log(`MATERIALIZING FULL PHASE 3B PRODUCTION ARTIFACT (${RELEASE_ID})`);
@@ -59,6 +59,29 @@ for (const dir of copyDirs) {
   const dest = path.join(TARGET_DIR, dir);
   if (fs.existsSync(src)) {
     fs.cpSync(src, dest, { recursive: true });
+  }
+}
+
+// Explicit deterministic exclusion rules:
+// 1. releases/ directory describes the sealed artifact and must not recursively mutate its own source identity
+const artifactReleasesDir = path.join(TARGET_DIR, 'scripts/phase3b/releases');
+if (fs.existsSync(artifactReleasesDir)) {
+  fs.rmSync(artifactReleasesDir, { recursive: true, force: true });
+}
+
+// 2. canonical-package-lock.json is only a transport file and must never be inside production artifact
+const artifactTransportLock = path.join(TARGET_DIR, 'canonical-package-lock.json');
+if (fs.existsSync(artifactTransportLock)) {
+  fs.rmSync(artifactTransportLock, { force: true });
+}
+
+// 3. Generated production manifest metadata describes the sealed artifact and must not recursively mutate source identity
+const artifactPhase3bDir = path.join(TARGET_DIR, 'scripts/phase3b');
+if (fs.existsSync(artifactPhase3bDir)) {
+  for (const file of fs.readdirSync(artifactPhase3bDir)) {
+    if (file.startsWith('phase3b_production_')) {
+      fs.rmSync(path.join(artifactPhase3bDir, file), { force: true });
+    }
   }
 }
 
@@ -124,11 +147,21 @@ function listFilesRecursive(dir: string, baseDir: string = dir): string[] {
   for (const file of list) {
     if (file === 'node_modules' || file === '.git' || file === 'dist') continue;
     const fullPath = path.join(dir, file);
+    const relPath = path.relative(baseDir, fullPath).replace(/\\/g, '/');
+
+    // Deterministic exclusion rules:
+    // 1. Explicitly exclude scripts/phase3b/releases/ directory from production source manifest
+    if (relPath === 'scripts/phase3b/releases' || relPath.startsWith('scripts/phase3b/releases/')) continue;
+    // 2. Explicitly exclude transport file canonical-package-lock.json
+    if (relPath === 'canonical-package-lock.json' || file === 'canonical-package-lock.json') continue;
+    // 3. Explicitly exclude generated release metadata manifests to prevent circularity
+    if (relPath.startsWith('scripts/phase3b/phase3b_production_')) continue;
+
     const stat = fs.statSync(fullPath);
     if (stat && stat.isDirectory()) {
       results = results.concat(listFilesRecursive(fullPath, baseDir));
     } else {
-      results.push(path.relative(baseDir, fullPath).replace(/\\/g, '/'));
+      results.push(relPath);
     }
   }
   return results.sort();
@@ -192,7 +225,7 @@ try {
 const releaseManifest = {
   releaseId: RELEASE_ID,
   artifactName: 'Full Phase 3B Production Runtime Release Artifact',
-  createdAt: new Date().toISOString(),
+  createdAt: '2026-10-05T06:40:00.000Z',
   sourceRevision: {
     gitHeadSha,
     workingTreeDirty,
@@ -265,7 +298,7 @@ const releaseManifest = {
     maintenanceGuardsPreserved: true,
   },
   deploymentInstructions: {
-    command: 'railway up . --path-as-root --no-gitignore --service DocConvert-AI --environment production --message "phase3b-full-runtime-20261005-01"',
+    command: `railway up . --path-as-root --no-gitignore --service DocConvert-AI --environment production --message "${RELEASE_ID}"`,
     cwd: '.phase3b_production_artifact',
     targetWorkspace: "DuongAIOS's Projects",
     targetProject: 'zealous-friendship',
