@@ -1,6 +1,9 @@
 import React, { useState } from 'react';
 import { FileSpreadsheet, Shield, User as UserIcon, LogOut, ChevronDown, Plus, Sparkles } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
+import { CreditBalanceBadge } from './CreditBalanceBadge';
+import { useCreditBalance } from '../../hooks/useCreditBalance';
+import { isCreditBillingUiEnabled } from '../../config/features';
 
 interface NavbarProps {
   currentTab?: string;
@@ -11,6 +14,8 @@ interface NavbarProps {
 export const Navbar: React.FC<NavbarProps> = ({ currentTab = 'dashboard', onNavigate, onOpenUpload }) => {
   const { user, quota, isAuthenticated, logout } = useAuth();
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const creditBillingEnabled = isCreditBillingUiEnabled();
+  const creditBalance = useCreditBalance();
 
   const handleLogout = async () => {
     setDropdownOpen(false);
@@ -96,19 +101,27 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab = 'dashboard', onNavi
                   <span className="hidden sm:inline">Tải tài liệu</span>
                 </button>
 
-                {/* Quota Badge */}
-                {quota && (
-                  <div
-                    id="navbar-quota-badge"
+                {/* Billing Badge: Credit-aware if enabled, otherwise legacy quota */}
+                {creditBillingEnabled ? (
+                  <CreditBalanceBadge
+                    balance={creditBalance.balance}
+                    uiState={creditBalance.uiState}
                     onClick={() => onNavigate('pricing')}
-                    className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-slate-300 hover:border-slate-600 cursor-pointer transition"
-                    title={`Hạn mức: ${quota.used}/${quota.total} tài liệu`}
-                  >
-                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                    <span>
-                      <strong className="text-white font-semibold">{quota.used}</strong>/{quota.total} tài liệu
-                    </span>
-                  </div>
+                  />
+                ) : (
+                  quota && (
+                    <div
+                      id="navbar-quota-badge"
+                      onClick={() => onNavigate('pricing')}
+                      className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-slate-300 hover:border-slate-600 cursor-pointer transition"
+                      title={`Hạn mức: ${quota.used}/${quota.total} tài liệu`}
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                      <span>
+                        <strong className="text-white font-semibold">{quota.used}</strong>/{quota.total} tài liệu
+                      </span>
+                    </div>
+                  )
                 )}
 
                 {/* User Dropdown */}

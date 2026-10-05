@@ -3,6 +3,7 @@ import { db } from '../db/db.js';
 import { getBaseSupabaseClient, verifySupabaseToken } from '../services/supabaseClient.js';
 import { getSupabaseAdminClient } from '../services/supabaseAdmin.js';
 import { quotaService } from '../services/quotaService.js';
+import { creditService } from '../services/credit/creditService.js';
 import { auditService } from '../services/auditService.js';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth.js';
 
@@ -88,6 +89,14 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
       });
 
       const profile = await db.ensureProfile(user.id, user.email || cleanEmail, cleanFullName);
+
+      // Phase 3A.4 / 3A.4.2: Idempotent FREE bootstrap grant for new user
+      try {
+        await creditService.bootstrapNewUserFreeCredits(user.id, { enforceEligibility: true });
+      } catch (bootErr: any) {
+        console.error(`[Auth Register] Non-fatal free bootstrap grant error for user ${user.id}:`, bootErr?.message || bootErr);
+      }
+
       const token = signInData?.session?.access_token || '';
       const quota = await quotaService.checkUserQuota(user.id);
 
@@ -137,6 +146,14 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
       }
 
       const profile = await db.ensureProfile(authData.user.id, authData.user.email || cleanEmail, cleanFullName);
+
+      // Phase 3A.4 / 3A.4.2: Idempotent FREE bootstrap grant for new user
+      try {
+        await creditService.bootstrapNewUserFreeCredits(authData.user.id, { enforceEligibility: true });
+      } catch (bootErr: any) {
+        console.error(`[Auth Register] Non-fatal free bootstrap grant error for user ${authData.user.id}:`, bootErr?.message || bootErr);
+      }
+
       const token = authData.session?.access_token || '';
       const quota = await quotaService.checkUserQuota(authData.user.id);
 
@@ -165,12 +182,15 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // 3. Unified Supabase Local Auth Engine fallback
+    // 3. Unified Supabase Local Auth Engine fallback (DEV-ONLY FALLBACK)
     const { user, profile, session } = await db.createAuthUserAndProfile({
       email: cleanEmail,
       password_hash: password,
       full_name: cleanFullName,
     });
+
+    // Phase 3A.4.1 (Section XI): Branch 3 is local/test-only fallback (no row created in auth.users).
+    // Live credit bootstrap is unsupported in this branch to preserve credit_accounts.user_id REFERENCES auth.users(id) FK integrity.
 
     const quota = await quotaService.checkUserQuota(user.id);
 

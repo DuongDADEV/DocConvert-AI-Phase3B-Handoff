@@ -48,7 +48,10 @@ function AppContent() {
   };
 
   const handleOpenUpload = (resumeId?: string) => {
-    setResumeDocId(resumeId);
+    const cleanId = typeof resumeId === 'string' && resumeId.trim() !== '' && resumeId !== '[object Object]'
+      ? resumeId.trim()
+      : undefined;
+    setResumeDocId(cleanId);
     setIsUploadOpen(true);
   };
 

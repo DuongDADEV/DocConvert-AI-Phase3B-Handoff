@@ -1,4 +1,4 @@
-import { User, QuotaInfo, DocumentItem, ProcessingJob, Plan, AuditLog, ExportItem, OCRMetadataItem, UnifiedTransactionTable, PreflightDetails } from '../types';
+import { User, QuotaInfo, DocumentItem, ProcessingJob, Plan, BillingPricingPlan, CreditPack, AuditLog, ExportItem, OCRMetadataItem, UnifiedTransactionTable, PreflightDetails } from '../types';
 
 const getApiBase = (): string => {
   const envUrl = (import.meta as any).env?.VITE_API_URL;
@@ -138,6 +138,9 @@ class ApiClient {
   }
 
   async getDocumentPreflight(documentId: string) {
+    if (typeof documentId !== 'string' || !documentId.trim() || documentId === '[object Object]') {
+      throw new Error(`INVALID_ARGUMENT: documentId must be a valid string UUID, got: ${String(documentId)}`);
+    }
     const res = await fetch(`${API_BASE}/documents/${documentId}/preflight`, {
       method: 'GET',
       headers: this.getHeaders(),
@@ -287,13 +290,29 @@ class ApiClient {
     return this.handleResponse<{ success: boolean; job: ProcessingJob }>(res);
   }
 
-  // --- PLANS & UPGRADE ---
+  // --- PLANS & BILLING ---
   async getPlans() {
     const res = await fetch(`${API_BASE}/plans`, {
       method: 'GET',
       headers: this.getHeaders(),
     });
     return this.handleResponse<{ success: boolean; plans: Plan[] }>(res);
+  }
+
+  async getBillingPlans(channel = 'WEB') {
+    const res = await fetch(`${API_BASE}/billing/plans?channel=${encodeURIComponent(channel)}`, {
+      method: 'GET',
+      headers: this.getHeaders(),
+    });
+    return this.handleResponse<{ success: boolean; channel: string; plans: BillingPricingPlan[] }>(res);
+  }
+
+  async getCreditPacks(channel = 'WEB') {
+    const res = await fetch(`${API_BASE}/billing/credit-packs?channel=${encodeURIComponent(channel)}`, {
+      method: 'GET',
+      headers: this.getHeaders(),
+    });
+    return this.handleResponse<{ success: boolean; channel: string; creditPacks: CreditPack[] }>(res);
   }
 
   async upgradePlan(planId: string) {
@@ -382,6 +401,51 @@ class ApiClient {
     document.body.removeChild(a);
 
     return blob;
+  }
+
+  // --- CREDITS & ELIGIBILITY (PHASE 2C.1) ---
+  async getCreditBalance() {
+    const res = await fetch(`${API_BASE}/credits/balance`, {
+      method: 'GET',
+      headers: this.getHeaders(),
+    });
+    return this.handleResponse<{
+      success: boolean;
+      grossRemainingUnits: number;
+      reservedUnits: number;
+      totalAvailableUnits: number;
+      totalAvailableCredits: number;
+      status?: 'ACTIVE' | 'FROZEN' | 'CLOSED' | 'NONE';
+      userId?: string;
+      accountId?: string | null;
+      buckets?: {
+        subscriptionUnits: number;
+        purchasedUnits: number;
+        otherUnits: number;
+      };
+    }>(res);
+  }
+
+  async evaluateProcessingEligibility(documentId: string) {
+    const res = await fetch(`${API_BASE}/documents/${documentId}/processing-eligibility`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    return this.handleResponse<{
+      success: boolean;
+      eligible: boolean;
+      reason: string;
+      message: string;
+      availableUnits: number;
+      availableCredits: number;
+      estimatedUnits: number;
+      estimatedCredits: number;
+      shortageUnits: number;
+      shortageCredits: number;
+      processingPricingVersion?: string;
+      breakdown?: Record<string, any>;
+      estimationBasis?: string;
+    }>(res);
   }
 }
 

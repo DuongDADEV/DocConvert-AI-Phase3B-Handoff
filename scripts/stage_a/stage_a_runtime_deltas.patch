@@ -1,0 +1,75 @@
+diff --git a/server/routes/documents.ts b/server/routes/documents.ts
+--- a/server/routes/documents.ts
++++ b/server/routes/documents.ts
+@@ -418,20 +418,7 @@ router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, re
+       userId,
+       docId,
+       requestedOutputType,
+-      req.userToken,
+-      {
+-        estimatedUnits: eligibility.estimatedUnits,
+-        pricingVersion: eligibility.processingPricingVersion,
+-        quoteSnapshot: {
+-          estimatedUnits: eligibility.estimatedUnits,
+-          estimatedBillableUnits: eligibility.estimatedUnits,
+-          processingPricingVersion: eligibility.processingPricingVersion,
+-          outputType: requestedOutputType,
+-          breakdown: eligibility.breakdown,
+-          estimationBasis: eligibility.estimationBasis,
+-          estimatedCredits: eligibility.estimatedCredits,
+-        },
+-      }
++      req.userToken
+     );
+ 
+     // 4. Handle Idempotent Results
+@@ -443,7 +430,6 @@ router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, re
+         message: result.message || 'Tài liệu đã nằm trong hàng đợi xử lý.',
+         document: result.document,
+         job: result.job,
+-        reservation: result.reservation,
+         quota: result.quota,
+       });
+       return;
+@@ -457,7 +443,6 @@ router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, re
+         message: result.message || 'Tài liệu đã được xử lý hoàn tất.',
+         document: result.document,
+         job: result.job,
+-        reservation: result.reservation,
+         quota: result.quota,
+       });
+       return;
+@@ -501,7 +486,6 @@ router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, re
+       message: result.message || 'Đã xác nhận và bắt đầu đưa tài liệu vào hàng đợi xử lý OCR.',
+       document: result.document,
+       job: result.job,
+-      reservation: result.reservation,
+       quota: result.quota,
+     });
+   } catch (err: any) {
+diff --git a/server/services/ocrWorker.ts b/server/services/ocrWorker.ts
+--- a/server/services/ocrWorker.ts
++++ b/server/services/ocrWorker.ts
+@@ -109,22 +109,6 @@ export class OcrBackgroundWorker {
+         return null;
+       }
+ 
+-      // 3b. Phase 3B / 3B.1 Worker Hard Gate: Processing job must have a valid ACTIVE reservation
+-      // Validates bidirectional consistency, user match, status ('RESERVED'/'PARTIALLY_CAPTURED'), amount, and remaining held units
+-      const reservationValidation = await db.getValidatedReservationForJob(job);
+-      if (!reservationValidation.valid) {
+-        console.error(
+-          `[OcrWorker] [DEFENSIVE_FINANCIAL_GATE_FAIL] Job ${jobId} failed reservation validation: ${reservationValidation.reason}. Worker failing closed.`
+-        );
+-        await db.updateProcessingJob(userId, jobId, {
+-          status: 'FAILED',
+-          error_code: 'MISSING_CREDIT_RESERVATION',
+-          error_message: `Không tìm thấy hoặc không hợp lệ khoản giữ trước tín dụng cho tác vụ này (${reservationValidation.reason}).`,
+-          completed_at: new Date().toISOString(),
+-        });
+-        return null;
+-      }
+-
+       // 4. Update status to PROCESSING
+       await db.updateProcessingJob(userId, jobId, {
+         status: 'PROCESSING',

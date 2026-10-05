@@ -150,6 +150,10 @@ export interface ProcessingJobRecord {
   completed_at?: string | null;
   created_at: string;
   updated_at: string;
+  pricing_version?: string | null;
+  estimated_billable_units?: number | null;
+  quote_snapshot?: Record<string, any> | null;
+  reservation_id?: string | null;
 }
 
 export interface AuditLogRecord {
@@ -253,7 +257,7 @@ export interface ActiveSession {
   expires_at: number;
 }
 
-class DatabaseService {
+export class DatabaseService {
   /**
    * Helper to resolve the appropriate Supabase Client:
    * Uses User-Scoped Client (with Bearer Token for RLS) when userToken is passed,
@@ -318,6 +322,17 @@ class DatabaseService {
       .eq('id', userId)
       .select()
       .single();
+    return data || null;
+  }
+
+  async getDocument(userId: string, documentId: string, userToken?: string) {
+    const client = this.getClient(userToken);
+    const { data } = await client
+      .from('documents')
+      .select('*')
+      .eq('id', documentId)
+      .eq('user_id', userId)
+      .maybeSingle();
     return data || null;
   }
 
@@ -521,6 +536,16 @@ class DatabaseService {
   }
 
   async getUserDocumentById(userId: string, documentId: string, userToken?: string): Promise<DocumentRecord | null> {
+    if (typeof documentId !== 'string') {
+      throw new TypeError(`INVALID_ARGUMENT: documentId must be a string, got ${typeof documentId}`);
+    }
+    if (!documentId.trim() || documentId === '[object Object]') {
+      return null;
+    }
+    if (!userId || typeof userId !== 'string' || userId === '[object Object]') {
+      return null;
+    }
+
     const client = this.getClient(userToken);
     const { data, error } = await client
       .from('documents')
@@ -531,6 +556,10 @@ class DatabaseService {
       .maybeSingle();
 
     if (error) {
+      if (error.code === '22P02' || error.message?.includes('invalid input syntax for type uuid')) {
+        console.warn(`[getUserDocumentById] Invalid UUID syntax for documentId: "${documentId}". Returning null.`);
+        return null;
+      }
       console.error(`[getUserDocumentById] Error fetching document ${documentId}:`, error);
       throw error;
     }
@@ -629,15 +658,22 @@ class DatabaseService {
   }
 
   /**
-   * Phase 4.2: Atomic PostgreSQL RPC confirmation
+   * Phase 4.2 / Phase 3B: Atomic PostgreSQL RPC confirmation
    * Executes document row locking, quota row locking, active job idempotency,
-   * quota deduction, and job creation in a SINGLE PostgreSQL transaction.
+   * credit reservation, quota deduction, and job creation in a SINGLE PostgreSQL transaction.
    */
   async confirmDocumentProcessing(
     userId: string,
     documentId: string,
     outputType: string = 'EXCEL',
-    userToken?: string
+    userToken?: string,
+    options?: {
+      estimatedUnits?: number;
+      pricingVersion?: string;
+      quoteSnapshot?: any;
+      idempotencyKey?: string;
+      reservationMetadata?: any;
+    }
   ): Promise<{
     success: boolean;
     already_processing?: boolean;
@@ -645,6 +681,7 @@ class DatabaseService {
     message?: string;
     document: DocumentRecord;
     job: ProcessingJobRecord | null;
+    reservation?: any;
     quota: {
       used: number;
       total: number;
@@ -658,17 +695,126 @@ class DatabaseService {
     // The RPC function itself has EXECUTE permissions revoked from PUBLIC, anon, authenticated,
     // and granted ONLY to service_role, preventing any client-side direct bypass.
     const client = getSupabaseAdminClient();
-    const { data, error } = await client.rpc('confirm_document_processing', {
+    const rpcParams: Record<string, any> = {
       p_document_id: documentId,
       p_user_id: userId,
       p_output_type: outputType,
-    });
+    };
+
+    if (options?.estimatedUnits !== undefined) {
+      if (typeof options.estimatedUnits !== 'number' || !Number.isSafeInteger(options.estimatedUnits) || options.estimatedUnits <= 0) {
+        const err: any = new Error(`INVALID_PROCESSING_ESTIMATE: estimatedUnits must be a positive safe integer. Got: ${options.estimatedUnits}`);
+        err.code = 'INVALID_PROCESSING_ESTIMATE';
+        throw err;
+      }
+      rpcParams.p_estimated_units = options.estimatedUnits;
+      rpcParams.p_pricing_version = options.pricingVersion || 'processing-pricing-v1';
+      rpcParams.p_quote_snapshot = options.quoteSnapshot || {};
+      if (options.idempotencyKey) {
+        rpcParams.p_idempotency_key = options.idempotencyKey;
+      }
+      if (options.reservationMetadata) {
+        rpcParams.p_reservation_metadata = options.reservationMetadata;
+      }
+    }
+
+    const { data, error } = await client.rpc('confirm_document_processing', rpcParams);
 
     if (error) {
       throw error;
     }
 
     return data;
+  }
+
+  /**
+   * Phase 3B: Query active credit reservation linked to a processing job.
+   * Used by worker hard gate to verify valid reservation exists before OCR provider calls.
+   */
+  async getActiveReservationForJob(jobId: string): Promise<any | null> {
+    const client = getSupabaseAdminClient();
+    const { data } = await client
+      .from('credit_reservations')
+      .select('*')
+      .eq('reference_type', 'PROCESSING_JOB')
+      .eq('reference_id', jobId)
+      .in('status', ['RESERVED', 'PARTIALLY_CAPTURED'])
+      .maybeSingle();
+    return data || null;
+  }
+
+  /**
+   * Phase 3B.1: Validates reservation existence, status, ownership, bidirectional consistency,
+   * amount, and held units before OCR worker execution.
+   */
+  async getValidatedReservationForJob(job: ProcessingJobRecord): Promise<{
+    valid: boolean;
+    reason?: string;
+    reservation?: any;
+  }> {
+    // Historical job check: If job has no reservation_id and no pricing_version, it is a historical pre-Phase-3B job.
+    if (!job.reservation_id && !job.pricing_version) {
+      return {
+        valid: false,
+        reason: 'HISTORICAL_JOB_NO_RESERVATION',
+      };
+    }
+
+    if (!job.reservation_id) {
+      return { valid: false, reason: 'MISSING_JOB_RESERVATION_ID' };
+    }
+
+    const client = getSupabaseAdminClient();
+    const { data: reservation, error } = await client
+      .from('credit_reservations')
+      .select('*')
+      .eq('id', job.reservation_id)
+      .maybeSingle();
+
+    if (error || !reservation) {
+      return { valid: false, reason: 'RESERVATION_NOT_FOUND' };
+    }
+
+    // 1. Status must be active: 'RESERVED' or 'PARTIALLY_CAPTURED'
+    if (reservation.status !== 'RESERVED' && reservation.status !== 'PARTIALLY_CAPTURED') {
+      return { valid: false, reason: `INVALID_RESERVATION_STATUS: ${reservation.status}`, reservation };
+    }
+
+    // 2. Canonical reference linkage
+    if (reservation.reference_type !== 'PROCESSING_JOB') {
+      return { valid: false, reason: `REFERENCE_TYPE_MISMATCH: ${reservation.reference_type}`, reservation };
+    }
+
+    if (reservation.reference_id !== job.id) {
+      return { valid: false, reason: `REFERENCE_ID_MISMATCH: expected ${job.id}, got ${reservation.reference_id}`, reservation };
+    }
+
+    // 3. User ownership consistency
+    if (reservation.user_id !== job.user_id) {
+      return { valid: false, reason: `USER_ID_MISMATCH: job user ${job.user_id} != reservation user ${reservation.user_id}`, reservation };
+    }
+
+    // 4. Amount consistency
+    if (job.estimated_billable_units !== null && job.estimated_billable_units !== undefined) {
+      if (Number(reservation.requested_units) !== Number(job.estimated_billable_units)) {
+        return { valid: false, reason: `AMOUNT_MISMATCH: job estimated ${job.estimated_billable_units} != requested ${reservation.requested_units}`, reservation };
+      }
+    }
+
+    // 5. Remaining held units check: remaining = reserved - captured - released
+    const heldUnits = Number(reservation.reserved_units) - Number(reservation.captured_units) - Number(reservation.released_units);
+    if (heldUnits <= 0) {
+      return { valid: false, reason: `NO_HELD_UNITS_REMAINING: heldUnits = ${heldUnits}`, reservation };
+    }
+
+    // 6. Before initial execution, captured_units should be 0 and released_units should be 0
+    if (job.status === 'QUEUED' || !job.started_at) {
+      if (Number(reservation.captured_units) > 0 || Number(reservation.released_units) > 0) {
+        return { valid: false, reason: 'RESERVATION_ALREADY_MUTATED_BEFORE_INITIAL_RUN', reservation };
+      }
+    }
+
+    return { valid: true, reservation };
   }
 
   // --- DOCUMENT PAGES (PREFLIGHT NORMALIZED TABLE) ---
@@ -897,6 +1043,7 @@ class DatabaseService {
       metadata: {
         provider: analysis.provider,
         linesCount: p.linesCount,
+        telemetry: (p as any).telemetry || null,
         ...(idx === 0 && analysis.documentMetadata ? { documentMetadata: analysis.documentMetadata } : {}),
         ...analysis.metadata,
       },
@@ -1038,6 +1185,64 @@ class DatabaseService {
     }
 
     console.log(`[saveOcrAnalysis] Successfully persisted analysis atomically via PostgreSQL RPC for doc ${documentId}`);
+  }
+
+  /**
+   * Phase 3A.3.1: Updates persisted ocr_results.metadata with post-execution Secondary OCR telemetry.
+   * Ensures document-level technical usage accurately reflects cells processed, attempts, and provider usage.
+   */
+  async updateSecondaryOcrTelemetry(
+    documentId: string,
+    summary: {
+      secondaryOcrExecuted: boolean;
+      secondaryOcrCellCount: number;
+      secondaryOcrAttemptCount: number;
+      providerSummary: Record<string, number>;
+      resolvedCount: number;
+      unresolvedCount: number;
+    }
+  ): Promise<void> {
+    const client = getSupabaseAdminClient();
+    try {
+      const { data: records, error } = await client
+        .from('ocr_results')
+        .select('id, metadata')
+        .eq('document_id', documentId);
+
+      if (error) {
+        console.warn(`[updateSecondaryOcrTelemetry] Failed to fetch ocr_results for doc ${documentId}:`, error.message);
+        return;
+      }
+
+      if (records && records.length > 0) {
+        for (const rec of records) {
+          const currentMeta = rec.metadata || {};
+          const currentTechUsage = currentMeta.technicalUsage || {};
+          const updatedTechUsage = {
+            ...currentTechUsage,
+            secondaryOcrExecuted: summary.secondaryOcrExecuted,
+            secondaryOcrCellCount: summary.secondaryOcrCellCount,
+            secondaryOcrAttemptCount: summary.secondaryOcrAttemptCount,
+            secondaryOcrProviderSummary: summary.providerSummary,
+            successfulResolutionCount: summary.resolvedCount,
+            failedResolutionCount: summary.unresolvedCount,
+          };
+          await client
+            .from('ocr_results')
+            .update({
+              metadata: {
+                ...currentMeta,
+                technicalUsage: updatedTechUsage,
+                secondaryOcrSummary: summary,
+              },
+            })
+            .eq('id', rec.id);
+        }
+        console.log(`[updateSecondaryOcrTelemetry] Successfully persisted secondary OCR telemetry for doc ${documentId}`);
+      }
+    } catch (err: any) {
+      console.warn(`[TELEMETRY_PERSISTENCE_WARNING] Failed to update secondary OCR telemetry for doc ${documentId}:`, err?.message || err);
+    }
   }
 
   private async cleanupOcrData(documentId: string): Promise<void> {

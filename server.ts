@@ -8,7 +8,9 @@ import authRoutes from './server/routes/auth.js';
 import documentRoutes from './server/routes/documents.js';
 import jobRoutes from './server/routes/jobs.js';
 import planRoutes from './server/routes/plans.js';
+import billingRoutes from './server/routes/billing.js';
 import auditRoutes from './server/routes/audit.js';
+import creditRoutes from './server/routes/credits.js';
 import { ocrWorker } from './server/services/ocrWorker.js';
 
 export async function createApp() {
@@ -70,7 +72,9 @@ export async function createApp() {
   app.use('/api/documents', documentRoutes);
   app.use('/api/jobs', jobRoutes);
   app.use('/api/plans', planRoutes);
+  app.use('/api/billing', billingRoutes);
   app.use('/api/audit-logs', auditRoutes);
+  app.use('/api/credits', creditRoutes);
 
   // 5. Global Error Handler for API
   app.use('/api', (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

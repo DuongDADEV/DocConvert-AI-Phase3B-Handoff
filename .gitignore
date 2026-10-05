@@ -9,4 +9,7 @@ coverage/
 .data/
 scratch/
 supabase/.temp/
+.bridge_verify_wt/
+.stage_a_artifact/
 
+.phase3b_production_artifact/

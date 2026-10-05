@@ -109,6 +109,22 @@ export class OcrBackgroundWorker {
         return null;
       }
 
+      // 3b. Phase 3B / 3B.1 Worker Hard Gate: Processing job must have a valid ACTIVE reservation
+      // Validates bidirectional consistency, user match, status ('RESERVED'/'PARTIALLY_CAPTURED'), amount, and remaining held units
+      const reservationValidation = await db.getValidatedReservationForJob(job);
+      if (!reservationValidation.valid) {
+        console.error(
+          `[OcrWorker] [DEFENSIVE_FINANCIAL_GATE_FAIL] Job ${jobId} failed reservation validation: ${reservationValidation.reason}. Worker failing closed.`
+        );
+        await db.updateProcessingJob(userId, jobId, {
+          status: 'FAILED',
+          error_code: 'MISSING_CREDIT_RESERVATION',
+          error_message: `Không tìm thấy hoặc không hợp lệ khoản giữ trước tín dụng cho tác vụ này (${reservationValidation.reason}).`,
+          completed_at: new Date().toISOString(),
+        });
+        return null;
+      }
+
       // 4. Update status to PROCESSING
       await db.updateProcessingJob(userId, jobId, {
         status: 'PROCESSING',
@@ -274,8 +290,20 @@ export class OcrBackgroundWorker {
 
             console.log(
               `[OcrWorker] Phase 7 Targeted Secondary OCR completed for doc ${documentId}: ` +
-              `processed ${resolutionSummary.processedCount}, resolved ${resolutionSummary.resolvedCount}, remaining unresolved ${resolutionSummary.unresolvedCount}`
+              `processed ${resolutionSummary.processedCount}, attempts ${resolutionSummary.secondaryOcrAttemptCount}, resolved ${resolutionSummary.resolvedCount}, remaining unresolved ${resolutionSummary.unresolvedCount}, providerUsage: ${JSON.stringify(resolutionSummary.providerSummary)}`
             );
+
+            // Phase 3A.3.1: Persist Secondary OCR technical telemetry back to ocr_results.metadata
+            await db.updateSecondaryOcrTelemetry(documentId, resolutionSummary);
+
+            if (analysisResult?.metadata?.technicalUsage) {
+              analysisResult.metadata.technicalUsage.secondaryOcrExecuted = resolutionSummary.secondaryOcrExecuted;
+              analysisResult.metadata.technicalUsage.secondaryOcrCellCount = resolutionSummary.secondaryOcrCellCount;
+              analysisResult.metadata.technicalUsage.secondaryOcrAttemptCount = resolutionSummary.secondaryOcrAttemptCount;
+              analysisResult.metadata.technicalUsage.secondaryOcrProviderSummary = resolutionSummary.providerSummary;
+              analysisResult.metadata.technicalUsage.successfulResolutionCount = resolutionSummary.resolvedCount;
+              analysisResult.metadata.technicalUsage.failedResolutionCount = resolutionSummary.unresolvedCount;
+            }
           } catch (secOcrErr: any) {
             console.warn(`[OcrWorker] Phase 7 Secondary OCR encountered an error for doc ${documentId}, continuing to review workspace:`, secOcrErr.message || secOcrErr);
           }

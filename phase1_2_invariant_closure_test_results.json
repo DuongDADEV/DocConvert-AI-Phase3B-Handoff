@@ -1,0 +1,79 @@
+{
+  "timestamp": "2026-09-30T10:53:33.689Z",
+  "passCount": 12,
+  "failCount": 0,
+  "results": [
+    {
+      "id": "INV-01",
+      "name": "Legacy document quota and Billing credits are independent",
+      "status": "PASS",
+      "durationMs": 955
+    },
+    {
+      "id": "INV-02",
+      "name": "Credit Pack grants credits only (never grants subscription capabilities)",
+      "status": "PASS",
+      "durationMs": 526
+    },
+    {
+      "id": "INV-03",
+      "name": "Subscription capability source remains subscription-specific",
+      "status": "PASS",
+      "durationMs": 261
+    },
+    {
+      "id": "INV-04",
+      "name": "Canonical credit grant is single-source via public.product_credit_grants",
+      "status": "PASS",
+      "durationMs": 0
+    },
+    {
+      "id": "INV-05",
+      "name": "Commercial credit lookup fails closed when grant config is missing",
+      "status": "PASS",
+      "durationMs": 528
+    },
+    {
+      "id": "INV-06",
+      "name": "Locked pricing version rejects UPDATE of billing price (Trigger contract)",
+      "status": "PASS",
+      "durationMs": 1
+    },
+    {
+      "id": "INV-07",
+      "name": "Locked pricing version rejects DELETE of billing price, unlocked returns OLD",
+      "status": "PASS",
+      "durationMs": 0
+    },
+    {
+      "id": "INV-08",
+      "name": "Locked pricing version rejects modification of canonical credit grants",
+      "status": "PASS",
+      "durationMs": 0
+    },
+    {
+      "id": "INV-09",
+      "name": "Pricing version lock is monotonic (true -> false blocked, cannot delete locked version)",
+      "status": "PASS",
+      "durationMs": 0
+    },
+    {
+      "id": "INV-10",
+      "name": "Legacy processing quota check operates normally using document count",
+      "status": "PASS",
+      "durationMs": 991
+    },
+    {
+      "id": "INV-11",
+      "name": "Pricing endpoints remain backward compatible with 4 subscription plans and 4 credit packs",
+      "status": "PASS",
+      "durationMs": 803
+    },
+    {
+      "id": "INV-12",
+      "name": "Frontend production build artifact exists and is verified",
+      "status": "PASS",
+      "durationMs": 0
+    }
+  ]
+}

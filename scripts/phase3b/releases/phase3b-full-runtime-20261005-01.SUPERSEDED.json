@@ -1,0 +1,25 @@
+{
+  "releaseId": "phase3b-full-runtime-20261005-01",
+  "status": "SUPERSEDED_NEVER_DEPLOYED",
+  "supersededBy": "phase3b-full-runtime-20261005-02",
+  "supersededAt": "2026-10-05",
+  "supersededReason": "Phase 3B.4.1: cutover runbook (docs/phase3b_migration_cutover_runbook.md) is inside the source fingerprint. Correcting the circular maintenance-off procedure changed the source manifest, so -01 cannot remain immutable. Runtime is unchanged: server bundle SHA identical.",
+  "note": "Reconstructed record. The materializer writes to fixed paths (scripts/phase3b/phase3b_production_*), so the -01 manifest files were overwritten when -02 was materialized. Values below were captured from the -01 release manifest before regeneration.",
+  "createdAt": "2026-10-05T03:49:45.544Z",
+  "gitHeadSha": "3b4e41097dbd8222624cb559ce50e79646463d73",
+  "workingTreeDirty": true,
+  "sourceFileCount": 339,
+  "sha256": {
+    "serverBundle": "d927a1f027cbaf912a791c9413d2b273bf17096f3e2adda9bb7f2fb67bbecf97",
+    "materializerScript": "d6da6fcadccb5ab2aeece99ac9fd6fc578e43abffa557e438894445868360d3d",
+    "packageJson": "fd5694751920fc97edb0d802fa257068fee9df6a4b34705ca79fa312571e8836",
+    "packageLockJson": "e29b913f4df1a8cba147290308f9f60d421b09ae2548f973673b45810e2891bc",
+    "sourceManifest": "5a6ea86ed51d6c65efaab5e9d09b0a031980bd9c1ef1eb26926c7521ae0d415f",
+    "distManifest": "92728ca85225e4944110881dc17efcc5a7ed39ea82a2f5dcd7e66ba1432eaf21"
+  },
+  "integrityFinding": {
+    "reportedDistManifestSha256": "03a1c5389ee5ecdee6e59705542261a9838adc8873b72216f2fa2d356d49d2d5",
+    "actualDistManifestSha256": "92728ca85225e4944110881dc17efcc5a7ed39ea82a2f5dcd7e66ba1432eaf21",
+    "rootCause": "C — the Phase 3B.4 report quoted the Stage A dist manifest SHA (scripts/stage_a/stage_a_release_manifest.json distManifestSha256, also referenced in runbook section 3.1). The -01 release manifest itself was correct and verify_phase3b_release.ts passed 15/15."
+  }
+}

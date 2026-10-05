@@ -1,0 +1,67 @@
+{
+  "timestamp": "2026-09-30T10:35:24.344Z",
+  "passCount": 10,
+  "failCount": 0,
+  "results": [
+    {
+      "id": "INV-01",
+      "name": "Billing catalog does not depend on legacy document_quota",
+      "status": "PASS",
+      "durationMs": 473
+    },
+    {
+      "id": "INV-02",
+      "name": "included_credits and document_quota are strictly separated concepts",
+      "status": "PASS",
+      "durationMs": 822
+    },
+    {
+      "id": "INV-03",
+      "name": "pricing-v1 commercial terms cannot be mutated outside policy",
+      "status": "PASS",
+      "durationMs": 135
+    },
+    {
+      "id": "INV-04",
+      "name": "Price uniqueness supports multi-currency composite uniqueness design",
+      "status": "PASS",
+      "durationMs": 1
+    },
+    {
+      "id": "INV-05",
+      "name": "WEB plans returns exactly 4 plans: FREE, BASIC, PRO, BUSINESS",
+      "status": "PASS",
+      "durationMs": 280
+    },
+    {
+      "id": "INV-06",
+      "name": "Credit packs returns exactly 4 packs: PACK_50, PACK_200, PACK_500, PACK_2000",
+      "status": "PASS",
+      "durationMs": 276
+    },
+    {
+      "id": "INV-07",
+      "name": "API channel safely returns empty array []",
+      "status": "PASS",
+      "durationMs": 271
+    },
+    {
+      "id": "INV-08",
+      "name": "Legacy quota processing still operates under document count semantics",
+      "status": "PASS",
+      "durationMs": 140
+    },
+    {
+      "id": "INV-09",
+      "name": "RLS policy explicitly restricts inactive products and enforces tenant safety",
+      "status": "PASS",
+      "durationMs": 1
+    },
+    {
+      "id": "INV-10",
+      "name": "Frontend production build succeeds and dist index.html exists",
+      "status": "PASS",
+      "durationMs": 0
+    }
+  ]
+}

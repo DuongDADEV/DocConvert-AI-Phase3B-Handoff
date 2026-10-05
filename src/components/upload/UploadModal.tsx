@@ -52,7 +52,10 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   // Handle Resume Preflight flow when resumeDocumentId is provided
   useEffect(() => {
     let active = true;
-    if (isOpen && resumeDocumentId) {
+    const isValidResumeId = typeof resumeDocumentId === 'string' &&
+      resumeDocumentId.trim() !== '' &&
+      resumeDocumentId !== '[object Object]';
+    if (isOpen && isValidResumeId) {
       setStep('PREFLIGHT_LOADING');
       setError(null);
       api

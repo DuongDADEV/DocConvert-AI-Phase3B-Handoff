@@ -18,6 +18,55 @@ export interface Plan {
   created_at: string;
 }
 
+export interface BillingPlanEntitlements {
+  included_credits: number;
+  max_file_mb: number;
+  batch_enabled: boolean;
+  priority_queue: boolean;
+  api_access: 'NONE' | 'BETA' | 'FULL';
+  retention_days: number;
+  pdf_to_word: boolean;
+  pdf_to_excel: boolean;
+}
+
+export interface BillingPricingPlan {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  channel: 'WEB' | 'API' | 'ENTERPRISE';
+  product_type: 'SUBSCRIPTION' | 'CREDIT_PACK' | 'USAGE' | 'ENTERPRISE';
+  price: number;
+  currency: string;
+  billing_interval: 'NONE' | 'MONTH' | 'YEAR';
+  interval_count: number;
+  credits: number;
+  entitlements: BillingPlanEntitlements;
+  metadata: {
+    badge?: string | null;
+    sort_order?: number;
+    [key: string]: any;
+  };
+  pricing_version: string;
+}
+
+export interface CreditPack {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  channel: 'WEB' | 'API' | 'ENTERPRISE';
+  product_type: 'CREDIT_PACK';
+  price: number;
+  currency: string;
+  credits: number;
+  metadata: {
+    sort_order?: number;
+    [key: string]: any;
+  };
+  pricing_version: string;
+}
+
 export interface QuotaInfo {
   allowed: boolean;
   used: number;
@@ -357,5 +406,56 @@ export interface UnifiedTransactionTable {
     projectionDurationMs: number;
     logicalGroupCount: number;
   };
+}
+
+export type CreditAccountStatus = 'ACTIVE' | 'FROZEN' | 'CLOSED' | 'NONE';
+
+export interface UserCreditBalance {
+  grossRemainingUnits: number;
+  reservedUnits: number;
+  totalAvailableUnits: number;
+  totalAvailableCredits: number;
+  status?: CreditAccountStatus;
+  userId?: string;
+  accountId?: string | null;
+  buckets?: {
+    subscriptionUnits: number;
+    purchasedUnits: number;
+    otherUnits: number;
+  };
+}
+
+export type CreditAccountUiState =
+  | 'LOADING'
+  | 'SUCCESS'
+  | 'NO_CREDIT_ACCOUNT'
+  | 'AUTH_ERROR'
+  | 'API_ERROR';
+
+export type ProcessingEligibilityReason =
+  | 'ELIGIBLE'
+  | 'INSUFFICIENT_CREDIT'
+  | 'CREDIT_ACCOUNT_NOT_FOUND'
+  | 'CREDIT_ACCOUNT_FROZEN'
+  | 'CREDIT_ACCOUNT_CLOSED'
+  | 'PROCESSING_PRICING_NOT_CONFIGURED'
+  | 'INVALID_PROCESSING_ESTIMATE'
+  | 'DOCUMENT_NOT_READY'
+  | 'DOCUMENT_NOT_FOUND';
+
+export interface ProcessingEligibilityResponse {
+  success: boolean;
+  eligible: boolean;
+  reason: ProcessingEligibilityReason;
+  message: string;
+  availableUnits: number;
+  availableCredits: number;
+  estimatedUnits: number;
+  estimatedCredits: number;
+  shortageUnits: number;
+  shortageCredits: number;
+  processingPricingVersion?: string;
+  breakdown?: Record<string, any>;
+  estimationBasis?: string;
 }
 

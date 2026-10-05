@@ -71,6 +71,7 @@ export interface OCRPage {
   confidence?: number;
   lines?: OCRLine[];
   angle?: number;
+  telemetry?: any;
 }
 
 export type SemanticType =

@@ -1,0 +1,38 @@
+diff --git a/server/routes/documents.ts b/server/routes/documents.ts
+index e8a42e4..c5eff9b 100644
+--- a/server/routes/documents.ts
++++ b/server/routes/documents.ts
+@@ -324,6 +324,16 @@ router.post('/upload', ocrRateLimiter, upload.single('file'), async (req: Authen
+ 
+ // 5.1 CONFIRM AND TRIGGER EXPENSIVE OCR PROCESSING PIPELINE (ATOMIC POSTGRESQL TRANSACTION)
+ router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
++  // Maintenance Guard (Stage A Bridge)
++  if (process.env.PROCESSING_MAINTENANCE_MODE === 'true') {
++    res.status(503).json({
++      success: false,
++      code: 'PROCESSING_TEMPORARILY_UNAVAILABLE',
++      message: 'Document processing is temporarily unavailable during maintenance.',
++    });
++    return;
++  }
++
+   const userId = req.user!.id;
+   const docId = req.params.id;
+   const requestedOutputType = (req.body?.outputType || 'EXCEL').toUpperCase();
+@@ -626,6 +636,16 @@ router.get('/:id/ocr-result', async (req: AuthenticatedRequest, res: Response):
+ 
+ // 8. TRIGGER / RETRY OCR PROCESSING
+ router.post('/:id/ocr', ocrRateLimiter, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
++  // Maintenance Guard (Stage A Bridge)
++  if (process.env.PROCESSING_MAINTENANCE_MODE === 'true') {
++    res.status(503).json({
++      success: false,
++      code: 'PROCESSING_TEMPORARILY_UNAVAILABLE',
++      message: 'Document processing is temporarily unavailable during maintenance.',
++    });
++    return;
++  }
++
+   try {
+     const userId = req.user!.id;
+     const docId = req.params.id;

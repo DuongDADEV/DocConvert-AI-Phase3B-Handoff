@@ -16,6 +16,7 @@ import { createSupabaseUserClient, getSupabaseAdminClient } from '../services/su
 import { UnifiedTableService } from '../services/unifiedTableService.js';
 import { preflightService, PREFLIGHT_CONFIG } from '../services/preflightService.js';
 import { humanReviewService } from '../services/humanReviewService.js';
+import { processingEligibilityService } from '../services/credit/processingEligibilityService.js';
 
 const router = express.Router();
 
@@ -60,6 +61,19 @@ const upload = multer({
 
 // All document routes require Supabase Bearer Authentication
 router.use(authMiddleware);
+
+// Intercept malformed document IDs (e.g. '[object Object]') before querying DB
+router.param('id', (_req, res, next, id) => {
+  if (!id || typeof id !== 'string' || id.trim() === '' || id === '[object Object]') {
+    res.status(400).json({
+      success: false,
+      code: 'INVALID_DOCUMENT_ID',
+      error: 'Mã tài liệu không hợp lệ.',
+    });
+    return;
+  }
+  next();
+});
 
 // 1. GET ALL USER DOCUMENTS (RLS: User can only see their own documents)
 router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
@@ -322,8 +336,50 @@ router.post('/upload', ocrRateLimiter, upload.single('file'), async (req: Authen
   }
 });
 
+// 5.0 PRE-PROCESSING CREDIT GUARD & ELIGIBILITY EVALUATION (READ-ONLY UX GUARD)
+router.post('/:id/processing-eligibility', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    // Strictly derive userId from authenticated session context. NEVER trust body-supplied userId.
+    const userId = req.user!.id;
+    const docId = req.params.id;
+
+    const result = await processingEligibilityService.evaluateProcessingEligibility(
+      userId,
+      docId,
+      {
+        userClient: req.supabaseClient,
+        userToken: req.userToken,
+      }
+    );
+
+    const httpStatus = result.reason === 'DOCUMENT_NOT_FOUND' ? 404 : 200;
+    res.status(httpStatus).json({
+      success: result.reason !== 'DOCUMENT_NOT_FOUND',
+      ...result,
+    });
+  } catch (err: any) {
+    console.error('[PROCESSING_ELIGIBILITY_ERROR] Error evaluating eligibility:', err);
+    res.status(500).json({
+      success: false,
+      error: 'Không thể đánh giá điều kiện xử lý tài liệu',
+      message: err.message,
+    });
+  }
+});
+
 // 5.1 CONFIRM AND TRIGGER EXPENSIVE OCR PROCESSING PIPELINE (ATOMIC POSTGRESQL TRANSACTION)
 router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  // Maintenance Guard (Phase 3B.3 Cutover Safety)
+  if (process.env.PROCESSING_MAINTENANCE_MODE === 'true') {
+    res.status(503).json({
+      success: false,
+      code: 'PROCESSING_TEMPORARILY_UNAVAILABLE',
+      message: 'Document processing is temporarily unavailable during maintenance.',
+      error: 'Document processing is temporarily unavailable during maintenance.',
+    });
+    return;
+  }
+
   const userId = req.user!.id;
   const docId = req.params.id;
   const requestedOutputType = (req.body?.outputType || 'EXCEL').toUpperCase();
@@ -342,15 +398,56 @@ router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, re
   }
 
   try {
-    // 2. Call Atomic PostgreSQL RPC (locks document & quota, verifies state, creates job, deducts quota, transitions document)
+    // 2. Authoritative Server-Side Processing Pricing & Credit Eligibility Evaluation (Phase 3B)
+    const eligibility = await processingEligibilityService.evaluateProcessingEligibility(
+      userId,
+      docId,
+      { userClient: req.supabaseClient, userToken: req.userToken }
+    );
+
+    if (!eligibility.eligible) {
+      console.warn(`[PROCESS_CONFIRM_BLOCKED] docId: ${docId}, userId: ${userId}, reason: ${eligibility.reason}`);
+      let status = 409;
+      const errorCode = eligibility.reason || 'INSUFFICIENT_CREDITS';
+      if (eligibility.reason === 'DOCUMENT_NOT_FOUND') status = 404;
+      if (eligibility.reason === 'PROCESSING_PRICING_NOT_CONFIGURED') status = 503;
+
+      res.status(status).json({
+        success: false,
+        code: errorCode,
+        error: eligibility.message || 'Không đủ điều kiện để xử lý tài liệu.',
+        requiredUnits: eligibility.estimatedUnits,
+        availableUnits: eligibility.availableUnits,
+        shortageUnits: eligibility.shortageUnits,
+        requiredCredits: eligibility.estimatedCredits,
+        availableCredits: eligibility.availableCredits,
+        shortageCredits: eligibility.shortageCredits,
+      });
+      return;
+    }
+
+    // 3. Call Atomic PostgreSQL RPC (locks document & quota, verifies state, creates job, reserves credits, deducts quota, transitions document)
     const result = await db.confirmDocumentProcessing(
       userId,
       docId,
       requestedOutputType,
-      req.userToken
+      req.userToken,
+      {
+        estimatedUnits: eligibility.estimatedUnits,
+        pricingVersion: eligibility.processingPricingVersion,
+        quoteSnapshot: {
+          estimatedUnits: eligibility.estimatedUnits,
+          estimatedBillableUnits: eligibility.estimatedUnits,
+          processingPricingVersion: eligibility.processingPricingVersion,
+          outputType: requestedOutputType,
+          breakdown: eligibility.breakdown,
+          estimationBasis: eligibility.estimationBasis,
+          estimatedCredits: eligibility.estimatedCredits,
+        },
+      }
     );
 
-    // 3. Handle Idempotent Results
+    // 4. Handle Idempotent Results
     if (result.already_processing) {
       console.log(`[PROCESS_CONFIRM_ALREADY_PROCESSING] docId: ${docId}, jobId: ${result.job?.id}`);
       res.json({
@@ -359,6 +456,7 @@ router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, re
         message: result.message || 'Tài liệu đã nằm trong hàng đợi xử lý.',
         document: result.document,
         job: result.job,
+        reservation: result.reservation,
         quota: result.quota,
       });
       return;
@@ -372,15 +470,16 @@ router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, re
         message: result.message || 'Tài liệu đã được xử lý hoàn tất.',
         document: result.document,
         job: result.job,
+        reservation: result.reservation,
         quota: result.quota,
       });
       return;
     }
 
-    // 4. TRANSACTION IS COMMITTED!
+    // 5. TRANSACTION IS COMMITTED!
     console.log(`[PROCESS_CONFIRM_COMMITTED] docId: ${docId}, jobId: ${result.job?.id}, quotaUsed: ${result.quota.used}/${result.quota.total}`);
 
-    // 5. Trigger Background Worker ONLY AFTER COMMIT
+    // 6. Trigger Background Worker ONLY AFTER COMMIT
     if (result.job?.id) {
       try {
         ocrService.startExistingJob(userId, result.job.id, docId);
@@ -392,7 +491,7 @@ router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, re
       }
     }
 
-    // 6. Non-critical Audit Log (Outside critical transaction)
+    // 7. Non-critical Audit Log (Outside critical transaction)
     try {
       await auditService.log({
         userId,
@@ -415,11 +514,40 @@ router.post('/:id/process', ocrRateLimiter, async (req: AuthenticatedRequest, re
       message: result.message || 'Đã xác nhận và bắt đầu đưa tài liệu vào hàng đợi xử lý OCR.',
       document: result.document,
       job: result.job,
+      reservation: result.reservation,
       quota: result.quota,
     });
   } catch (err: any) {
     const errorMsg = String(err.message || '');
     console.error(`[PROCESS_CONFIRM_FAILED] docId: ${docId}:`, errorMsg);
+
+    // Map PostgreSQL RPC credit reservation exceptions to application-level HTTP errors
+    if (errorMsg.includes('INSUFFICIENT_CREDIT')) {
+      res.status(409).json({
+        success: false,
+        code: 'INSUFFICIENT_CREDITS',
+        error: 'Số dư tín dụng không đủ để hoàn tất đặt trước và đưa tài liệu vào hàng đợi.',
+      });
+      return;
+    }
+
+    if (errorMsg.includes('CREDIT_ACCOUNT_FROZEN')) {
+      res.status(409).json({
+        success: false,
+        code: 'CREDIT_ACCOUNT_FROZEN',
+        error: 'Tài khoản tín dụng đang bị tạm khóa. Không thể thực hiện đặt trước mới.',
+      });
+      return;
+    }
+
+    if (errorMsg.includes('CREDIT_ACCOUNT_CLOSED')) {
+      res.status(409).json({
+        success: false,
+        code: 'CREDIT_ACCOUNT_CLOSED',
+        error: 'Tài khoản tín dụng đã bị đóng. Không thể thực hiện đặt trước mới.',
+      });
+      return;
+    }
 
     // Map PostgreSQL RPC exceptions to application-level HTTP errors
     if (errorMsg.includes('INSUFFICIENT_QUOTA')) {
@@ -626,6 +754,17 @@ router.get('/:id/ocr-result', async (req: AuthenticatedRequest, res: Response): 
 
 // 8. TRIGGER / RETRY OCR PROCESSING
 router.post('/:id/ocr', ocrRateLimiter, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  // Maintenance Guard (Phase 3B.3 Cutover Safety)
+  if (process.env.PROCESSING_MAINTENANCE_MODE === 'true') {
+    res.status(503).json({
+      success: false,
+      code: 'PROCESSING_TEMPORARILY_UNAVAILABLE',
+      message: 'Document processing is temporarily unavailable during maintenance.',
+      error: 'Document processing is temporarily unavailable during maintenance.',
+    });
+    return;
+  }
+
   try {
     const userId = req.user!.id;
     const docId = req.params.id;

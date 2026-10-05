@@ -197,7 +197,7 @@ export const DocumentsPage: React.FC<DocumentsPageProps> = ({ onOpenUpload, sele
 
         <button
           id="btn-upload-doc-page"
-          onClick={onOpenUpload}
+          onClick={() => onOpenUpload()}
           className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-bold shadow-sm transition active:scale-95 self-start sm:self-auto"
         >
           <Plus className="w-4 h-4" />
@@ -296,7 +296,7 @@ export const DocumentsPage: React.FC<DocumentsPageProps> = ({ onOpenUpload, sele
             </button>
           </div>
         ) : (
-          <EmptyState onAction={onOpenUpload} />
+          <EmptyState onAction={() => onOpenUpload()} />
         )
       ) : (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">

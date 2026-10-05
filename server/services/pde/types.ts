@@ -33,6 +33,8 @@ export interface DocumentProcessingPlan {
   decisions: PageProcessingDecision[];
 }
 
+import type { ProcessingPageTechnicalTelemetry } from '../../types/processingPricing.js';
+
 export interface PageExtractionResult {
   pageNumber: number;
   strategyUsed: ProcessingStrategy;
@@ -46,6 +48,7 @@ export interface PageExtractionResult {
     unit: 'point' | 'inch' | 'pixel';
     scale?: number;
   };
+  telemetry?: ProcessingPageTechnicalTelemetry;
 }
 
 export interface LocalPageExtraction {

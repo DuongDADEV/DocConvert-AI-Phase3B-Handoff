@@ -1,0 +1,85 @@
+{
+  "timestamp": "2026-09-30T09:52:46.700Z",
+  "passCount": 13,
+  "failCount": 0,
+  "results": [
+    {
+      "id": "INV-01",
+      "name": "WEB active plans must return exactly 4 standard plans: FREE, BASIC, PRO, BUSINESS",
+      "status": "PASS",
+      "durationMs": 592
+    },
+    {
+      "id": "INV-02",
+      "name": "API channel currently has no subscription plans and returns []",
+      "status": "PASS",
+      "durationMs": 251
+    },
+    {
+      "id": "INV-03",
+      "name": "Credit pack must not be conflated with subscription plans",
+      "status": "PASS",
+      "durationMs": 900
+    },
+    {
+      "id": "INV-04",
+      "name": "FREE plan price must be 0 VND with 10 credits",
+      "status": "PASS",
+      "durationMs": 650
+    },
+    {
+      "id": "INV-05",
+      "name": "BASIC plan price must be 129.000 VND and 120 credits",
+      "status": "PASS",
+      "durationMs": 242
+    },
+    {
+      "id": "INV-06",
+      "name": "PRO plan price must be 349.000 VND, 450 credits, API Beta, Batch & Priority",
+      "status": "PASS",
+      "durationMs": 243
+    },
+    {
+      "id": "INV-07",
+      "name": "BUSINESS plan price must be 899.000 VND, 1.400 credits, Full API, Batch & Priority",
+      "status": "PASS",
+      "durationMs": 251
+    },
+    {
+      "id": "INV-08",
+      "name": "No plan uses \"document count\" as primary quota definition",
+      "status": "PASS",
+      "durationMs": 249
+    },
+    {
+      "id": "INV-09",
+      "name": "Inactive prices and zero/negative unconfigured prices must not be offered",
+      "status": "PASS",
+      "durationMs": 244
+    },
+    {
+      "id": "INV-10",
+      "name": "Pricing version attached correctly as \"pricing-v1\"",
+      "status": "PASS",
+      "durationMs": 611
+    },
+    {
+      "id": "INV-11",
+      "name": "Product code is unique across subscriptions and credit packs",
+      "status": "PASS",
+      "durationMs": 1577
+    },
+    {
+      "id": "INV-12",
+      "name": "Pricing channel and Product type enumeration validation",
+      "status": "PASS",
+      "durationMs": 0
+    },
+    {
+      "id": "INV-13",
+      "name": "Credit packs exact seed prices and credits (50: 59k, 200: 199k, 500: 449k, 2000: 1490k)",
+      "status": "PASS",
+      "durationMs": 241
+    }
+  ]
+}

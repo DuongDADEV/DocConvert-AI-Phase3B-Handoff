@@ -16,6 +16,16 @@ export interface SecondaryOcrCoordinatorOptions {
   provider?: SecondaryOcrProvider;
 }
 
+export interface SecondaryOcrExecutionResult {
+  processedCount: number;
+  resolvedCount: number;
+  unresolvedCount: number;
+  secondaryOcrExecuted: boolean;
+  secondaryOcrCellCount: number;
+  secondaryOcrAttemptCount: number;
+  providerSummary: Record<string, number>;
+}
+
 export class SecondaryOcrCoordinator {
   private pageRenderer = new PageRenderer();
   private regionExtractor = new RegionExtractor();
@@ -39,11 +49,7 @@ export class SecondaryOcrCoordinator {
     documentId: string,
     fileBuffer: Buffer,
     mimeType: string
-  ): Promise<{
-    processedCount: number;
-    resolvedCount: number;
-    unresolvedCount: number;
-  }> {
+  ): Promise<SecondaryOcrExecutionResult> {
     const supabase = getSupabaseAdminClient();
 
     // 1. Fetch cells that strictly require secondary OCR from Supabase
@@ -71,7 +77,15 @@ export class SecondaryOcrCoordinator {
 
     if (!targetCells || targetCells.length === 0) {
       console.log(`[SecondaryOcrCoordinator] No cells require secondary OCR for doc ${documentId}.`);
-      return { processedCount: 0, resolvedCount: 0, unresolvedCount: 0 };
+      return {
+        processedCount: 0,
+        resolvedCount: 0,
+        unresolvedCount: 0,
+        secondaryOcrExecuted: false,
+        secondaryOcrCellCount: 0,
+        secondaryOcrAttemptCount: 0,
+        providerSummary: {},
+      };
     }
 
     console.log(
@@ -81,6 +95,12 @@ export class SecondaryOcrCoordinator {
     let processedCount = 0;
     let resolvedCount = 0;
     let unresolvedCount = 0;
+    let totalAttempts = 0;
+    const providerSummary: Record<string, number> = {};
+
+    const recordProviderCall = (providerName: string) => {
+      providerSummary[providerName] = (providerSummary[providerName] || 0) + 1;
+    };
 
     for (const cell of targetCells) {
       try {
@@ -119,7 +139,9 @@ export class SecondaryOcrCoordinator {
         );
 
         // 4. Run secondary OCR attempt 1
+        totalAttempts++;
         const candidateBResult = await this.provider.recognizeRegion(snippetOriginal, cellContext);
+        recordProviderCall(candidateBResult.provider || 'azure-snippet-ocr');
 
         // 5. Check if enhanced retry is needed (if attempt 1 failed or invalid)
         let candidateBEnhancedResult = null;
@@ -138,7 +160,9 @@ export class SecondaryOcrCoordinator {
             boundingBox,
             { variant: 'enhanced_contrast', paddingPx: 8 }
           );
+          totalAttempts++;
           candidateBEnhancedResult = await this.provider.recognizeRegion(snippetEnhanced, cellContext);
+          recordProviderCall(candidateBEnhancedResult.provider || 'azure-snippet-ocr');
         }
 
         // 6. Resolve conflict
@@ -231,6 +255,14 @@ export class SecondaryOcrCoordinator {
     // Clean cache for this document
     this.pageRenderer.clearCache(documentId);
 
-    return { processedCount, resolvedCount, unresolvedCount };
+    return {
+      processedCount,
+      resolvedCount,
+      unresolvedCount,
+      secondaryOcrExecuted: processedCount > 0,
+      secondaryOcrCellCount: processedCount,
+      secondaryOcrAttemptCount: totalAttempts,
+      providerSummary,
+    };
   }
 }

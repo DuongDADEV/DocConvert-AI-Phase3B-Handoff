@@ -17,11 +17,14 @@ import { useAuth } from '../contexts/AuthContext';
 import { DocumentItem, AuditLog } from '../types';
 import { api } from '../services/api';
 import { QuotaCard } from '../components/dashboard/QuotaCard';
+import { CreditBalanceCard } from '../components/dashboard/CreditBalanceCard';
 import { RecentActivity } from '../components/dashboard/RecentActivity';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { EmptyState } from '../components/common/EmptyState';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { ErrorAlert } from '../components/common/ErrorAlert';
+import { useCreditBalance } from '../hooks/useCreditBalance';
+import { isCreditBillingUiEnabled } from '../config/features';
 
 interface DashboardPageProps {
   onNavigate: (tab: string, documentId?: string) => void;
@@ -30,6 +33,8 @@ interface DashboardPageProps {
 
 export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpenUpload }) => {
   const { user, quota, refreshProfile } = useAuth();
+  const creditBillingEnabled = isCreditBillingUiEnabled();
+  const credit = useCreditBalance();
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -155,7 +160,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
           </button>
           <button
             id="btn-dashboard-main-upload"
-            onClick={onOpenUpload}
+            onClick={() => onOpenUpload()}
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:scale-95 text-white text-sm font-bold shadow-sm transition"
           >
             <Plus className="w-4 h-4" />
@@ -168,9 +173,19 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
 
       {/* Overview Grid: Quota + Metric Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Quota Card (takes 1 or 2 cols on lg) */}
+        {/* Billing Card (takes 2 cols on lg): Credit-aware if enabled, otherwise legacy QuotaCard */}
         <div className="lg:col-span-2">
-          <QuotaCard quota={quota} onUpgradeClick={() => onNavigate('pricing')} />
+          {creditBillingEnabled ? (
+            <CreditBalanceCard
+              balance={credit.balance}
+              uiState={credit.uiState}
+              planName={quota?.planName || 'TÀI KHOẢN'}
+              onUpgradeClick={() => onNavigate('pricing')}
+              onRefresh={credit.refreshCreditBalance}
+            />
+          ) : (
+            <QuotaCard quota={quota} onUpgradeClick={() => onNavigate('pricing')} />
+          )}
         </div>
 
         {/* Quick Stat Summary */}
@@ -231,7 +246,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onNavigate, onOpen
           {isLoading ? (
             <LoadingSpinner message="Đang tải danh sách tài liệu..." />
           ) : documents.length === 0 ? (
-            <EmptyState onAction={onOpenUpload} />
+            <EmptyState onAction={() => onOpenUpload()} />
           ) : (
             <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
               <div className="overflow-x-auto">

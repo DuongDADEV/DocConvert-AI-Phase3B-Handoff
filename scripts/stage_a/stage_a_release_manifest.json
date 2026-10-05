@@ -1,0 +1,66 @@
+{
+  "releaseId": "stage-a-3b-bridge-20261004-03",
+  "artifactName": "Stage A Maintenance Bridge Deployment Artifact",
+  "createdAt": "2026-10-04T22:00:00.000Z",
+  "sourceRevision": {
+    "gitHeadSha": "3b4e41097dbd8222624cb559ce50e79646463d73",
+    "workingTreeDirty": true,
+    "sourceFingerprint": "7cd67ad19b5eddf4721e9c1eb1ece62f8ffb0ff9187cd71842fb12735ad7a308",
+    "baselineDescription": "Latest pre-Phase-3B compatible application baseline (Phase 3A.4.2 accepted working tree)"
+  },
+  "artifactPaths": {
+    "artifactDir": ".stage_a_artifact",
+    "serverBundle": ".stage_a_artifact/dist/server.cjs",
+    "patchFile": "scripts/stage_a/stage_a_runtime_deltas.patch",
+    "materializerScript": "scripts/stage_a/materialize_stage_a.ts"
+  },
+  "sha256": {
+    "serverBundle": "93e8c12dd1789165d26987da7e0459ce73fe33bb0d333c8243c445b1c81eabc3",
+    "patchFile": "b0ff240b66f9f68508e7aa6f8bbbe5a67fb58ce4bc26b83e238b9abe97a13c81",
+    "materializerScript": "355fe9766e7b2b2ed970afdda155b1a1ff4f289e12d635225664c9e43634b5cf",
+    "packageJson": "fd5694751920fc97edb0d802fa257068fee9df6a4b34705ca79fa312571e8836",
+    "packageLockJson": "e29b913f4df1a8cba147290308f9f60d421b09ae2548f973673b45810e2891bc"
+  },
+  "dependencyStatus": {
+    "packageLockPresent": true,
+    "npmCiUsable": true,
+    "junctionUsedInMaterializer": true,
+    "driftProtected": true
+  },
+  "changedRuntimeFiles": [
+    "server/routes/documents.ts",
+    "server/services/ocrWorker.ts"
+  ],
+  "excludedPhase3bDeltas": [
+    "confirmDocumentProcessing 8-arg quote snapshot parameters",
+    "documents.ts reservation metadata in response",
+    "ocrWorker.ts getValidatedReservationForJob hard gate",
+    "ocrWorker.ts MISSING_CREDIT_RESERVATION failure branch"
+  ],
+  "autoMigrationAudit": {
+    "hasAutoMigration": false,
+    "deploymentCanApplyDbMigration": false,
+    "inspectedConfigs": [
+      "package.json scripts",
+      "vercel.json",
+      "server.ts",
+      "no supabase db push found",
+      "no migration runners found"
+    ],
+    "repositoryAutoMigration": "NO",
+    "hostingPlatform": "NOT_VERIFIED",
+    "hostingPlatformAutoMigration": "NOT_VERIFIED",
+    "hostingVerificationChecklist": "scripts/stage_a/stage_a_hosting_verification_checklist.md"
+  },
+  "verification": {
+    "materializeCommand": "npx tsx scripts/stage_a/materialize_stage_a.ts",
+    "buildCommand": "npm run build",
+    "testCommand": "npx tsx server/tests/phase3b_3_4_stage_a_artifact.test.ts",
+    "buildResult": "PASS",
+    "testResult": "20/20 PASS"
+  },
+  "sourceManifestPath": "scripts/stage_a/stage_a_source_manifest.txt",
+  "sourceManifestSha256": "7cd67ad19b5eddf4721e9c1eb1ece62f8ffb0ff9187cd71842fb12735ad7a308",
+  "distManifestPath": "scripts/stage_a/stage_a_dist_manifest.txt",
+  "distManifestSha256": "03a1c5389ee5ecdee6e59705542261a9838adc8873b72216f2fa2d356d49d2d5"
+}

@@ -1,0 +1,93 @@
+{
+  "releaseId": "phase3b-full-runtime-20261005-02",
+  "artifactName": "Full Phase 3B Production Runtime Release Artifact",
+  "createdAt": "2026-10-05T04:35:20.961Z",
+  "sourceRevision": {
+    "gitHeadSha": "3b4e41097dbd8222624cb559ce50e79646463d73",
+    "workingTreeDirty": true,
+    "sourceManifestSha256": "115c4844848dcc43fd7103929e2e86f330fb580e0abf8c95f0e87cf6011d8db1",
+    "sourceFileCount": 341,
+    "baselineDescription": "Full Phase 3B Production Runtime with atomic credit reservation, worker hard gate, and credit ledger hotfix"
+  },
+  "artifactPaths": {
+    "artifactDir": ".phase3b_production_artifact",
+    "serverBundle": ".phase3b_production_artifact/dist/server.cjs",
+    "materializerScript": "scripts/phase3b/materialize_phase3b_production.ts",
+    "sourceManifest": "scripts/phase3b/phase3b_production_source_manifest.txt",
+    "distManifest": "scripts/phase3b/phase3b_production_dist_manifest.txt",
+    "predeployCheckSql": "scripts/phase3b/phase3b_predeploy_read_only_checks.sql"
+  },
+  "sha256": {
+    "serverBundle": "d927a1f027cbaf912a791c9413d2b273bf17096f3e2adda9bb7f2fb67bbecf97",
+    "materializerScript": "ea1b2370fbe138daa8b79dfb4c74a2e78c9bc988ea00e06da24793f9329d5c57",
+    "packageJson": "fd5694751920fc97edb0d802fa257068fee9df6a4b34705ca79fa312571e8836",
+    "packageLockJson": "e29b913f4df1a8cba147290308f9f60d421b09ae2548f973673b45810e2891bc",
+    "sourceManifest": "115c4844848dcc43fd7103929e2e86f330fb580e0abf8c95f0e87cf6011d8db1",
+    "distManifest": "92728ca85225e4944110881dc17efcc5a7ed39ea82a2f5dcd7e66ba1432eaf21"
+  },
+  "databaseBaselineRequirements": {
+    "phase2a": {
+      "migration": "20261001000000_credit_ledger_foundation.sql",
+      "requiredTables": [
+        "credit_accounts",
+        "credit_grants",
+        "credit_ledger"
+      ]
+    },
+    "phase2b": {
+      "migration": "20261002010000_credit_reservation_foundation.sql",
+      "requiredTables": [
+        "credit_reservations",
+        "credit_reservation_allocations",
+        "credit_reservation_events"
+      ],
+      "requiredConstraint": "chk_credit_ledger_entry_type: ('GRANT', 'ADJUSTMENT', 'EXPIRATION', 'CAPTURE')"
+    },
+    "phase3a": {
+      "migration": "20261003010000_credit_settlement_and_free_bootstrap_patch.sql",
+      "pricingPolicy": "processing-pricing-v1",
+      "oneTimeBootstrapIndex": "uq_credit_grants_one_time_free_bootstrap"
+    },
+    "phase3bLedgerHotfix": {
+      "migration": "20261005010000_fix_grant_user_credits_ledger_entry_type.sql",
+      "canonicalMapping": "p_source_type = 'ADMIN_ADJUSTMENT' -> 'ADJUSTMENT', ELSE 'GRANT'",
+      "ledgerConstraintUnchanged": true
+    },
+    "phase3bDatabaseMigration": {
+      "migration": "20261004010000_atomic_credit_reserve_before_processing_queue.sql",
+      "requiredColumns": {
+        "processing_jobs": [
+          "reservation_id UUID",
+          "pricing_version VARCHAR(50)",
+          "estimated_billable_units BIGINT",
+          "quote_snapshot JSONB"
+        ]
+      },
+      "canonicalConfirmRpc": "confirm_document_processing(UUID, UUID, VARCHAR, BIGINT, VARCHAR, JSONB, TEXT, JSONB)",
+      "legacy3ArgRpcStatus": "DEPRECATED_HARD_FAIL"
+    }
+  },
+  "runtimeInvariants": {
+    "extendedConfirmRpcUsed": true,
+    "legacy3ArgRpcUsedForNormalProcessing": false,
+    "trustedServerQuoteRecomputed": true,
+    "clientQuoteCannotOverrideEstimate": true,
+    "reservationBeforeQueue": true,
+    "workerReservationHardGateActive": true,
+    "stageAWorkerBypassRemoved": true,
+    "captureSemanticsPreserved": true,
+    "releaseSemanticsPreserved": true,
+    "ledgerHotfixCompatible": true,
+    "freeBootstrapCompatible": true,
+    "maintenanceGuardsPreserved": true
+  },
+  "deploymentInstructions": {
+    "command": "railway up . --path-as-root --no-gitignore --service DocConvert-AI --environment production --message \"phase3b-full-runtime-20261005-01\"",
+    "cwd": ".phase3b_production_artifact",
+    "targetWorkspace": "DuongAIOS's Projects",
+    "targetProject": "zealous-friendship",
+    "targetEnvironment": "production",
+    "targetService": "DocConvert-AI",
+    "maintenancePolicy": "KEEP_MAINTENANCE_TRUE_DURING_DEPLOY_AND_SMOKE"
+  }
+}
